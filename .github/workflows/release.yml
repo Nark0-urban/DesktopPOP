@@ -1,0 +1,33 @@
+# 버전 태그(v1.0.1 같은)를 올리면 GitHub가 알아서 zip을 만들어 Releases에 올림
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build zip
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          ./build-zip.ps1 -Version $v
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          gh release create '${{ github.ref_name }}' (Get-ChildItem dist/*.zip).FullName --title "DesktopPop $v" --generate-notes
