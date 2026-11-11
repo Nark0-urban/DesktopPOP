@@ -43,10 +43,3 @@ powershell -ExecutionPolicy Bypass -File build-zip.ps1
 ```
 
 `dist` 폴더에 zip 이 만들어져요.
-
-
-
-```bash
-git tag v1.0.1
-git push origin main --tags
-```
