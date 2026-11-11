@@ -123,6 +123,7 @@ public sealed class App : Application
             edgeTimer.Tick += (s, ev) => EdgeTick();
             edgeTimer.Start();
             DesktopBand.Install(); // 빈 바탕화면에서 끌면 선택 네모
+            KeyboardHook.Install(); // 선택한 아이콘에 Delete, F2, Enter, Ctrl+A/C/X
 
             // 가방 그림 보관함을 처음 한 번 미리 채워 둠 (기본 그림 그리기)
             if (!Config.LibrarySeeded)
@@ -399,25 +400,85 @@ public sealed class App : Application
     }
 
     /// <summary>휴지통으로 보내기 (휴지통 아이콘에 끌어다 놓거나 우클릭 → 삭제).</summary>
-    internal void RecycleFiles(string[] paths)
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    struct SHFILEOPSTRUCT
     {
-        var opt = Microsoft.VisualBasic.FileIO.UIOption.AllDialogs;
-        var bin = Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin;
-        foreach (var raw in paths)
+        public IntPtr hwnd;
+        public uint wFunc;
+        public string pFrom;
+        public string? pTo;
+        public ushort fFlags;
+        public bool fAnyOperationsAborted;
+        public IntPtr hNameMappings;
+        public string? lpszProgressTitle;
+    }
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SHFileOperation(ref SHFILEOPSTRUCT op);
+
+    /// <summary>
+    /// 휴지통으로 보내기 (permanent = 완전 삭제). 원래 바탕화면처럼 여러 개라도 확인 창은 한 번.
+    /// </summary>
+    internal void RecycleFiles(string[] paths, bool permanent = false)
+    {
+        var list = paths.Select(p => p.TrimEnd('\\'))
+            .Where(p => !p.StartsWith("::") && (File.Exists(p) || Directory.Exists(p)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (list.Count == 0) return;
+        var op = new SHFILEOPSTRUCT
         {
-            var p = raw.TrimEnd('\\');
-            if (p.StartsWith("::")) continue;
-            try
-            {
-                if (Directory.Exists(p)) Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(p, opt, bin);
-                else if (File.Exists(p)) Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(p, opt, bin);
-                else continue;
-                RemoveEverywhere(p);
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex) { MessageBox.Show($"삭제하지 못했어요.\n{ex.Message}", "DesktopPop"); }
+            wFunc = 3, // FO_DELETE
+            pFrom = string.Join("\0", list) + "\0\0",
+            fFlags = (ushort)((permanent ? 0 : 0x40 /*FOF_ALLOWUNDO = 휴지통*/) | 0x4000 /*FOF_WANTNUKEWARNING*/)
+        };
+        try
+        {
+            if (SHFileOperation(ref op) == 0 && !op.fAnyOperationsAborted)
+                foreach (var p in list.Where(p => !File.Exists(p) && !Directory.Exists(p))) RemoveEverywhere(p);
         }
+        catch (Exception ex) { MessageBox.Show($"삭제하지 못했어요.\n{ex.Message}", "DesktopPop"); }
         ScheduleRefresh();
+    }
+
+    // ---------- 선택된 아이콘 단축키 (KeyboardHook 에서 부름) ----------
+
+    static List<string> SelectedPaths(ISelHost host) => Sel.Ordered(host).Where(k => !k.StartsWith("::")).ToList();
+
+    internal void DeleteSelected(ISelHost host, bool permanent)
+    {
+        var paths = SelectedPaths(host).ToArray();
+        if (paths.Length == 0) return;
+        Sel.Clear();
+        RecycleFiles(paths, permanent);
+    }
+
+    internal void RenameSelected(ISelHost host)
+    {
+        var keys = Sel.Ordered(host);
+        if (keys.Count == 1 && Store.Get(keys[0]) is { IsVirtual: false } item) RenameItem(item);
+    }
+
+    internal void OpenSelected(ISelHost host)
+    {
+        var items = Sel.Ordered(host).Select(Store.Get).Where(i => i != null).ToList();
+        Sel.Clear();
+        foreach (var it in items) Shell.Launch(it!);
+    }
+
+    /// <summary>Ctrl+C / Ctrl+X: 탐색기에서 붙여넣을 수 있게 클립보드에.</summary>
+    internal void CopySelected(ISelHost host, bool cut)
+    {
+        var paths = SelectedPaths(host);
+        if (paths.Count == 0) return;
+        try
+        {
+            var files = new System.Collections.Specialized.StringCollection();
+            files.AddRange(paths.ToArray());
+            var data = new DataObject();
+            data.SetFileDropList(files);
+            data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(cut ? 2 : 5)));
+            Clipboard.SetDataObject(data, true);
+        }
+        catch (Exception ex) { Log(ex); }
     }
 
     static string UniqueDesktopName(string baseName)
@@ -657,6 +718,7 @@ public sealed class App : Application
         Diag($"  종료 (코드 {e.ApplicationExitCode}, 종료 메뉴/윈도우 종료={ShuttingDown})");
         ShuttingDown = true;
         DesktopBand.Uninstall();
+        KeyboardHook.Uninstall();
         SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
         foreach (var w in watchers) w.Dispose();
         tray?.Dispose();
