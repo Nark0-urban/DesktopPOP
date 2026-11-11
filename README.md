@@ -44,10 +44,7 @@ powershell -ExecutionPolicy Bypass -File build-zip.ps1
 
 `dist` 폴더에 zip 이 만들어져요.
 
-## 새 버전 올리기 (만든 사람용)
 
-`DesktopPop.csproj` 의 `<Version>` 을 올리고, 같은 번호로 태그를 붙여 올리면
-GitHub Actions 가 zip 을 만들어 Releases 에 자동으로 올려요.
 
 ```bash
 git tag v1.0.1
