@@ -154,14 +154,17 @@ internal static class Native
     /// <summary>지금 튀어나오면 안 되는 상황인지 (게임·영상 전체화면, 또는 최대화된 창이 앞에 있음).</summary>
     public static bool ShouldBlock(RECT mon, bool blockFullscreen, bool blockMaximized)
     {
-        // 윈도우가 직접 알려주는 "전체화면 앱 실행 중" 상태 (게임, 발표 모드 등)
-        if (blockFullscreen && SHQueryUserNotificationState(out int s) == 0 && (s == 2 || s == 3 || s == 4)) return true;
+        // 윈도우가 알려 주는 "전체화면 앱 실행 중" 상태 (게임, 발표 모드 등).
+        // 단, 게임이 켜져 있기만 해도(바탕화면 보기로 내려가 있어도) 계속 "실행 중"이라고 하므로
+        // 이건 맨 앞 창이 진짜 화면을 거의 다 덮고 있을 때만 믿음.
+        bool fullscreenAppRunning = blockFullscreen && SHQueryUserNotificationState(out int s) == 0 && (s == 2 || s == 3 || s == 4);
 
         var fg = GetForegroundWindow();
-        if (fg == IntPtr.Zero) return false;
+        if (fg == IntPtr.Zero) return fullscreenAppRunning;
         var sb = new StringBuilder(64);
         GetClassName(fg, sb, 64);
         var cls = sb.ToString();
+        // 바탕화면·작업 표시줄이 앞에 있으면(바탕화면 보기 버튼 등) 게임이 켜져 있어도 열어 줌
         if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
         GetWindowThreadProcessId(fg, out uint pid);
         if (pid == (uint)Environment.ProcessId) return false;
@@ -174,6 +177,14 @@ internal static class Native
         {
             GetWindowRect(fg, out var r);
             if (r.Left <= mon.Left && r.Top <= mon.Top && r.Right >= mon.Right && r.Bottom >= mon.Bottom) return true;
+            // 전체화면 게임인데 창 크기를 이상하게 알려 주는 경우: 화면의 90% 이상을 덮으면 게임으로 봄
+            if (fullscreenAppRunning)
+            {
+                long monArea = (long)(mon.Right - mon.Left) * (mon.Bottom - mon.Top);
+                long w = Math.Max(0, Math.Min(r.Right, mon.Right) - Math.Max(r.Left, mon.Left));
+                long h = Math.Max(0, Math.Min(r.Bottom, mon.Bottom) - Math.Max(r.Top, mon.Top));
+                if (monArea > 0 && w * h >= monArea * 9 / 10) return true;
+            }
         }
         return blockMaximized && IsZoomed(fg);
     }
