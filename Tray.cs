@@ -1,192 +1,365 @@
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using Microsoft.Win32;
-using WF = System.Windows.Forms;
+using System.Runtime.CompilerServices;
+using System.Windows.Forms;
+using System.Windows.Media;
 
 namespace DesktopPop;
 
-internal static class AutoStart
-{
-    const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string Name = "DesktopPop";
-
-    public static bool IsEnabled
-    {
-        get
-        {
-            using var k = Registry.CurrentUser.OpenSubKey(RunKey);
-            return k?.GetValue(Name) != null;
-        }
-    }
-
-    public static void Set(bool on)
-    {
-        using var k = Registry.CurrentUser.OpenSubKey(RunKey, true);
-        if (k == null) return;
-        if (on) k.SetValue(Name, $"\"{Environment.ProcessPath}\"");
-        else k.DeleteValue(Name, false);
-    }
-}
-
-/// <summary>작업 표시줄 오른쪽 아래(시계 옆) 아이콘과 메뉴.</summary>
 internal sealed class Tray : IDisposable
 {
-    readonly WF.NotifyIcon icon;
+	private readonly NotifyIcon icon;
 
-    public Tray(App app)
-    {
-        var menu = new WF.ContextMenuStrip();
-        menu.Items.Add("새 가방 만들기...", null, (s, e) => app.CreateBag(null));
-        menu.Items.Add("바탕화면에 새 폴더 만들기...", null, (s, e) => app.CreateNewFolder(Side.Left, null));
-        menu.Items.Add("바탕화면 폴더 열기", null, (s, e) => app.OpenDesktopFolder());
-        menu.Items.Add(new WF.ToolStripSeparator());
+	public Tray(App app)
+	{
+		ContextMenuStrip contextMenuStrip = new ContextMenuStrip
+		{
+			Items = { 
+			{
+				"모든 패널과 가방 펼치기 / 접기",
+				(Image?)null,
+				(EventHandler?)((object? s, EventArgs e) =>
+				{
+					app.ToggleAllPanels();
+				})
+			} }
+		};
+		ToolStripMenuItem button = new ToolStripMenuItem("떠 있는 패널 버튼 표시")
+		{
+			Checked = app.Config.ShowPanelButton,
+			CheckOnClick = true
+		};
+		button.Click += (object? s, EventArgs e) =>
+		{
+			app.SetPanelButtonVisible(button.Checked);
+		};
+		contextMenuStrip.Items.Add(button);
+		ToolStripMenuItem toggleItem = (ToolStripMenuItem)contextMenuStrip.Items[0];
+		ToolStripMenuItem hotkey = BuildHotkeyMenu(app);
+		contextMenuStrip.Items.Add(hotkey);
+		contextMenuStrip.Opening += (object? s, CancelEventArgs e) =>
+		{
+			button.Checked = app.Config.ShowPanelButton;
+			toggleItem.ShortcutKeyDisplayString = GlobalHotkey.IsRegistered ? app.Config.ToggleHotkey : null;
+			foreach (ToolStripItem it in hotkey.DropDownItems)
+			{
+				if (it is ToolStripMenuItem mi && mi.Tag is string combo)
+				{
+					mi.Checked = combo.Length == 0 ? !GlobalHotkey.IsRegistered : (GlobalHotkey.IsRegistered && string.Equals(combo, app.Config.ToggleHotkey, StringComparison.OrdinalIgnoreCase));
+				}
+			}
+		};
+		contextMenuStrip.Opened += (object? s, EventArgs e) =>
+		{
+			App.OpenMenus++;
+		};
+		contextMenuStrip.Closed += (object? s, ToolStripDropDownClosedEventArgs e) =>
+		{
+			App.OpenMenus = Math.Max(0, App.OpenMenus - 1);
+		};
+		contextMenuStrip.Items.Add(new ToolStripSeparator());
+		contextMenuStrip.Items.Add("새 가방 만들기...", null, (object? s, EventArgs e) =>
+		{
+			app.CreateBag(null);
+		});
+		contextMenuStrip.Items.Add("바탕화면에 새 폴더 만들기...", null, (object? s, EventArgs e) =>
+		{
+			app.CreateNewFolder(Side.Left, null);
+		});
+		contextMenuStrip.Items.Add("바탕화면 폴더 열기", null, (object? s, EventArgs e) =>
+		{
+			app.OpenDesktopFolder();
+		});
+		contextMenuStrip.Items.Add(new ToolStripSeparator());
+		ToolStripMenuItem hide = new ToolStripMenuItem("원래 바탕화면 아이콘 숨기기")
+		{
+			Checked = app.Config.HideDesktopIcons,
+			CheckOnClick = true
+		};
+		hide.Click += (object? s, EventArgs e) =>
+		{
+			app.SetHideDesktopIcons(hide.Checked);
+		};
+		contextMenuStrip.Items.Add(hide);
+		contextMenuStrip.Items.Add(new ToolStripMenuItem("자동 열기: 해당 가장자리가 바탕화면일 때만")
+		{
+			Enabled = false
+		});
+		ToolStripMenuItem speed = new ToolStripMenuItem("튀어나오는 반응 속도");
+		(string, int)[] array = new (string, int)[3]
+		{
+			("바로", 0),
+			("보통", 150),
+			("느긋하게", 400)
+		};
+		for (int num = 0; num < array.Length; num++)
+		{
+			(string, int) tuple = array[num];
+			string item = tuple.Item1;
+			int ms = tuple.Item2;
+			ToolStripMenuItem m = new ToolStripMenuItem(item)
+			{
+				Checked = (app.Config.EdgeDelayMs == ms)
+			};
+			m.Click += (object? s, EventArgs e) =>
+			{
+				app.Config.EdgeDelayMs = ms;
+				app.Config.Save();
+				foreach (ToolStripMenuItem dropDownItem in speed.DropDownItems)
+				{
+					dropDownItem.Checked = dropDownItem == m;
+				}
+			};
+			speed.DropDownItems.Add(m);
+		}
+		contextMenuStrip.Items.Add(speed);
+		contextMenuStrip.Items.Add(BuildColorMenu(app));
+		ToolStripMenuItem single = new ToolStripMenuItem("한 번 클릭으로 바로 실행")
+		{
+			Checked = app.Config.SingleClickLaunch,
+			CheckOnClick = true
+		};
+		single.Click += (object? s, EventArgs e) =>
+		{
+			app.Config.SingleClickLaunch = single.Checked;
+			app.Config.Save();
+		};
+		contextMenuStrip.Items.Add(single);
+		ToolStripMenuItem splash = new ToolStripMenuItem("켤 때 시작 애니메이션 보이기")
+		{
+			Checked = app.Config.ShowStartupAnimation,
+			CheckOnClick = true
+		};
+		splash.Click += (object? s, EventArgs e) =>
+		{
+			app.Config.ShowStartupAnimation = splash.Checked;
+			app.Config.Save();
+		};
+		contextMenuStrip.Items.Add(splash);
+		ToolStripMenuItem auto = new ToolStripMenuItem("윈도우 켤 때 자동 실행")
+		{
+			Checked = AutoStart.IsEnabled,
+			CheckOnClick = true
+		};
+		auto.Click += (object? s, EventArgs e) =>
+		{
+			AutoStart.Set(auto.Checked);
+		};
+		contextMenuStrip.Items.Add(auto);
+		contextMenuStrip.Items.Add(new ToolStripSeparator());
+		contextMenuStrip.Items.Add("바탕화면 배치 다시 읽어오기", null, (object? s, EventArgs e) =>
+		{
+			app.RereadLayout();
+		});
+		contextMenuStrip.Items.Add("새로고침", null, (object? s, EventArgs e) =>
+		{
+			app.ScheduleRefresh();
+		});
+		contextMenuStrip.Items.Add(new ToolStripSeparator());
+		contextMenuStrip.Items.Add("종료 (원래 아이콘 다시 보이기)", null, (object? s, EventArgs e) =>
+		{
+			app.Quit();
+		});
+		icon = new NotifyIcon
+		{
+			Icon = MakeIcon(),
+			Text = "DesktopPop - 바탕화면 팝업",
+			Visible = true,
+			ContextMenuStrip = contextMenuStrip
+		};
+	}
 
-        var hide = new WF.ToolStripMenuItem("원래 바탕화면 아이콘 숨기기") { Checked = app.Config.HideDesktopIcons, CheckOnClick = true };
-        hide.Click += (s, e) => app.SetHideDesktopIcons(hide.Checked);
-        menu.Items.Add(hide);
+	public void Balloon(string title, string text)
+	{
+		icon.ShowBalloonTip(6000, title, text, ToolTipIcon.Info);
+	}
 
-        var full = new WF.ToolStripMenuItem("게임·전체화면일 땐 안 튀어나오기") { Checked = app.Config.DisableInFullscreen, CheckOnClick = true };
-        full.Click += (s, e) => { app.Config.DisableInFullscreen = full.Checked; app.Config.Save(); };
-        menu.Items.Add(full);
+	private static System.Drawing.Color ToDrawing(System.Windows.Media.Color c)
+	{
+		return System.Drawing.Color.FromArgb(c.R, c.G, c.B);
+	}
 
-        var max = new WF.ToolStripMenuItem("다른 창이 최대화돼 있을 땐 안 튀어나오기") { Checked = app.Config.BlockWhenMaximized, CheckOnClick = true };
-        max.Click += (s, e) => { app.Config.BlockWhenMaximized = max.Checked; app.Config.Save(); };
-        menu.Items.Add(max);
+	/// <summary>"펼치기/접기 단축키" 메뉴: 미리 정한 몇 가지 중 고르거나 끄기.</summary>
+	private ToolStripMenuItem BuildHotkeyMenu(App app)
+	{
+		ToolStripMenuItem root = new ToolStripMenuItem("펼치기/접기 단축키");
+		foreach (string combo in GlobalHotkey.Presets)
+		{
+			string c = combo;
+			ToolStripMenuItem mi = new ToolStripMenuItem(c + (c == GlobalHotkey.Default ? "  (기본)" : "")) { Tag = c };
+			mi.Click += (object? s, EventArgs e) =>
+			{
+				if (!app.SetToggleHotkey(c, notifyOnFail: false))
+				{
+					System.Windows.MessageBox.Show(c + " 는 다른 프로그램이 이미 쓰고 있어서 쓸 수 없어요.\n다른 키를 골라 주세요.", "DesktopPop");
+					app.SetToggleHotkey(app.Config.ToggleHotkey, notifyOnFail: false); // 원래 키 다시 등록
+				}
+			};
+			root.DropDownItems.Add(mi);
+		}
+		root.DropDownItems.Add(new ToolStripSeparator());
+		ToolStripMenuItem custom = new ToolStripMenuItem("직접 정하기...");
+		custom.Click += (object? s, EventArgs e) =>
+		{
+			string old = app.Config.ToggleHotkey;
+			GlobalHotkey.Unregister(); // 키를 누르는 동안 지금 단축키가 먹지 않게 잠깐 풀어 둠
+			string? picked = HotkeyDialog.Ask(old);
+			if (picked == null)
+			{
+				app.SetToggleHotkey(old, notifyOnFail: false); // 취소: 원래대로
+				return;
+			}
+			if (!app.SetToggleHotkey(picked, notifyOnFail: false))
+			{
+				System.Windows.MessageBox.Show(picked + " 는 Windows 나 다른 프로그램이 이미 쓰고 있어서 쓸 수 없어요.\n다른 조합을 골라 주세요.", "DesktopPop");
+				app.SetToggleHotkey(old, notifyOnFail: false);
+			}
+		};
+		root.DropDownItems.Add(custom);
+		root.DropDownOpening += (object? s, EventArgs e) =>
+		{
+			string cur = app.Config.ToggleHotkey;
+			bool isCustom = GlobalHotkey.IsRegistered && Array.FindIndex(GlobalHotkey.Presets, p => string.Equals(p, cur, StringComparison.OrdinalIgnoreCase)) < 0;
+			custom.Text = isCustom ? "직접 정하기: " + cur + "  (바꾸기...)" : "직접 정하기...";
+			custom.Checked = isCustom;
+		};
+		root.DropDownItems.Add(new ToolStripSeparator());
+		ToolStripMenuItem off = new ToolStripMenuItem("끄기") { Tag = "" };
+		off.Click += (object? s, EventArgs e) =>
+		{
+			app.SetToggleHotkey("", notifyOnFail: false);
+		};
+		root.DropDownItems.Add(off);
+		return root;
+	}
 
-        var speed = new WF.ToolStripMenuItem("튀어나오는 반응 속도");
-        foreach (var (name, ms) in new[] { ("바로", 0), ("보통", 150), ("느긋하게", 400) })
-        {
-            var m = new WF.ToolStripMenuItem(name) { Checked = app.Config.EdgeDelayMs == ms };
-            m.Click += (s, e) =>
-            {
-                app.Config.EdgeDelayMs = ms;
-                app.Config.Save();
-                foreach (WF.ToolStripMenuItem x in speed.DropDownItems) x.Checked = x == m;
-            };
-            speed.DropDownItems.Add(m);
-        }
-        menu.Items.Add(speed);
-        menu.Items.Add(BuildColorMenu(app));
+	private ToolStripMenuItem BuildColorMenu(App app)
+	{
+		ToolStripMenuItem root = new ToolStripMenuItem("색상");
+		(string, string, string)[] presets = Theme.Presets;
+		for (int i = 0; i < presets.Length; i++)
+		{
+			(string, string, string) tuple = presets[i];
+			string item = tuple.Item1;
+			string accent = tuple.Item2;
+			string panel = tuple.Item3;
+			ToolStripMenuItem toolStripMenuItem = new ToolStripMenuItem(item, Swatch(accent, panel))
+			{
+				Tag = (accent, panel)
+			};
+			toolStripMenuItem.Click += (object? s, EventArgs e) =>
+			{
+				Set(accent, panel);
+			};
+			root.DropDownItems.Add(toolStripMenuItem);
+		}
+		root.DropDownItems.Add(new ToolStripSeparator());
+		root.DropDownItems.Add("강조색 직접 고르기... (반짝임·고리·배지)", null, (object? s, EventArgs e) =>
+		{
+			string text = PickColor(Theme.Accent);
+			if (text != null)
+			{
+				Set(text, app.Config.PanelColor ?? "#1A1026");
+			}
+		});
+		root.DropDownItems.Add("판 배경색 직접 고르기... (가장자리·가방 뒤)", null, (object? s, EventArgs e) =>
+		{
+			string text = PickColor(Theme.Panel);
+			if (text != null)
+			{
+				Set(app.Config.AccentColor ?? "#FF6EB4", text);
+			}
+		});
+		RefreshChecks();
+		return root;
+		void RefreshChecks()
+		{
+			string b = app.Config.AccentColor ?? "#FF6EB4";
+			string b2 = app.Config.PanelColor ?? "#1A1026";
+			foreach (ToolStripItem dropDownItem in root.DropDownItems)
+			{
+				if (dropDownItem is ToolStripMenuItem { Tag: ITuple { Length: 2 } tag } toolStripMenuItem2 && tag[0] is string a && tag[1] is string a2)
+				{
+					toolStripMenuItem2.Checked = string.Equals(a, b, StringComparison.OrdinalIgnoreCase) && string.Equals(a2, b2, StringComparison.OrdinalIgnoreCase);
+				}
+			}
+		}
+		void Set(string? accent2, string? panel2)
+		{
+			app.SetTheme(accent2, panel2);
+			icon.Icon = MakeIcon();
+			RefreshChecks();
+		}
+	}
 
-        var single = new WF.ToolStripMenuItem("한 번 클릭으로 바로 실행") { Checked = app.Config.SingleClickLaunch, CheckOnClick = true };
-        single.Click += (s, e) => { app.Config.SingleClickLaunch = single.Checked; app.Config.Save(); };
-        menu.Items.Add(single);
+	private static string? PickColor(System.Windows.Media.Color current)
+	{
+		using ColorDialog colorDialog = new ColorDialog
+		{
+			FullOpen = true,
+			AnyColor = true,
+			Color = ToDrawing(current)
+		};
+		if (colorDialog.ShowDialog() != DialogResult.OK)
+		{
+			return null;
+		}
+		return $"#{colorDialog.Color.R:X2}{colorDialog.Color.G:X2}{colorDialog.Color.B:X2}";
+	}
 
-        var splash = new WF.ToolStripMenuItem("켤 때 시작 애니메이션 보이기") { Checked = app.Config.ShowStartupAnimation, CheckOnClick = true };
-        splash.Click += (s, e) => { app.Config.ShowStartupAnimation = splash.Checked; app.Config.Save(); };
-        menu.Items.Add(splash);
+	private static Image Swatch(string accentHex, string panelHex)
+	{
+		Bitmap bitmap = new Bitmap(16, 16);
+		using Graphics graphics = Graphics.FromImage(bitmap);
+		graphics.SmoothingMode = SmoothingMode.AntiAlias;
+		using (SolidBrush brush = new SolidBrush(ToDrawing(Theme.Parse(panelHex).Value)))
+		{
+			graphics.FillRectangle(brush, 0, 0, 16, 16);
+		}
+		using (SolidBrush brush2 = new SolidBrush(ToDrawing(Theme.Parse(accentHex).Value)))
+		{
+			graphics.FillEllipse(brush2, 3, 3, 10, 10);
+		}
+		return bitmap;
+	}
 
-        var auto = new WF.ToolStripMenuItem("윈도우 켤 때 자동 실행") { Checked = AutoStart.IsEnabled, CheckOnClick = true };
-        auto.Click += (s, e) => AutoStart.Set(auto.Checked);
-        menu.Items.Add(auto);
+	private static Icon MakeIcon()
+	{
+		try
+		{
+			string processPath = Environment.ProcessPath;
+			int width = SystemInformation.SmallIconSize.Width;
+			if (processPath != null)
+			{
+				Icon icon = Icon.ExtractIcon(processPath, 0, width);
+				if (icon != null)
+				{
+					return icon;
+				}
+			}
+		}
+		catch
+		{
+		}
+		Bitmap bitmap = new Bitmap(32, 32);
+		using (Graphics graphics = Graphics.FromImage(bitmap))
+		{
+			graphics.SmoothingMode = SmoothingMode.AntiAlias;
+			using System.Drawing.Drawing2D.LinearGradientBrush brush = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, 32, 32), ToDrawing(Theme.TrayA), ToDrawing(Theme.TrayB), 45f);
+			graphics.FillEllipse(brush, 1, 1, 30, 30);
+			graphics.FillRectangle(System.Drawing.Brushes.White, 9, 9, 6, 6);
+			graphics.FillRectangle(System.Drawing.Brushes.White, 17, 9, 6, 6);
+			graphics.FillRectangle(System.Drawing.Brushes.White, 9, 17, 6, 6);
+			graphics.FillRectangle(System.Drawing.Brushes.White, 17, 17, 6, 6);
+		}
+		return Icon.FromHandle(bitmap.GetHicon());
+	}
 
-        menu.Items.Add(new WF.ToolStripSeparator());
-        menu.Items.Add("바탕화면 배치 다시 읽어오기", null, (s, e) => app.RereadLayout());
-        menu.Items.Add("새로고침", null, (s, e) => app.ScheduleRefresh());
-        menu.Items.Add(new WF.ToolStripSeparator());
-        menu.Items.Add("종료 (원래 아이콘 다시 보이기)", null, (s, e) => app.Quit());
-
-        icon = new WF.NotifyIcon
-        {
-            Icon = MakeIcon(),
-            Text = "DesktopPop - 바탕화면 팝업",
-            Visible = true,
-            ContextMenuStrip = menu
-        };
-    }
-
-    public void Balloon(string title, string text) => icon.ShowBalloonTip(6000, title, text, WF.ToolTipIcon.Info);
-
-    static Color ToDrawing(System.Windows.Media.Color c) => Color.FromArgb(c.R, c.G, c.B);
-
-    /// <summary>"색상" 메뉴: 미리 만든 조합 + 직접 고르기.</summary>
-    WF.ToolStripMenuItem BuildColorMenu(App app)
-    {
-        var root = new WF.ToolStripMenuItem("색상");
-        void RefreshChecks()
-        {
-            var a = app.Config.AccentColor ?? Theme.DefaultAccent;
-            var p = app.Config.PanelColor ?? Theme.DefaultPanel;
-            foreach (WF.ToolStripItem it in root.DropDownItems)
-                if (it is WF.ToolStripMenuItem mi && mi.Tag is (string pa, string pp))
-                    mi.Checked = string.Equals(pa, a, StringComparison.OrdinalIgnoreCase) && string.Equals(pp, p, StringComparison.OrdinalIgnoreCase);
-        }
-        void Set(string? accent, string? panel)
-        {
-            app.SetTheme(accent, panel);
-            icon.Icon = MakeIcon();
-            RefreshChecks();
-        }
-
-        foreach (var (name, accent, panel) in Theme.Presets)
-        {
-            var mi = new WF.ToolStripMenuItem(name, Swatch(accent, panel)) { Tag = (accent, panel) };
-            mi.Click += (s, e) => Set(accent, panel);
-            root.DropDownItems.Add(mi);
-        }
-        root.DropDownItems.Add(new WF.ToolStripSeparator());
-        root.DropDownItems.Add("강조색 직접 고르기... (반짝임·고리·배지)", null, (s, e) =>
-        {
-            var c = PickColor(Theme.Accent);
-            if (c != null) Set(c, app.Config.PanelColor ?? Theme.DefaultPanel);
-        });
-        root.DropDownItems.Add("판 배경색 직접 고르기... (가장자리·가방 뒤)", null, (s, e) =>
-        {
-            var c = PickColor(Theme.Panel);
-            if (c != null) Set(app.Config.AccentColor ?? Theme.DefaultAccent, c);
-        });
-        RefreshChecks();
-        return root;
-    }
-
-    static string? PickColor(System.Windows.Media.Color current)
-    {
-        using var dlg = new WF.ColorDialog { FullOpen = true, AnyColor = true, Color = ToDrawing(current) };
-        if (dlg.ShowDialog() != WF.DialogResult.OK) return null;
-        return $"#{dlg.Color.R:X2}{dlg.Color.G:X2}{dlg.Color.B:X2}";
-    }
-
-    /// <summary>메뉴 옆 작은 색 견본 (배경 네모 위에 강조색 동그라미).</summary>
-    static Image Swatch(string accentHex, string panelHex)
-    {
-        var bmp = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var pb = new SolidBrush(ToDrawing(Theme.Parse(panelHex)!.Value))) g.FillRectangle(pb, 0, 0, 16, 16);
-        using (var ab = new SolidBrush(ToDrawing(Theme.Parse(accentHex)!.Value))) g.FillEllipse(ab, 3, 3, 10, 10);
-        return bmp;
-    }
-
-    static Icon MakeIcon()
-    {
-        // exe 에 들어 있는 앱 아이콘(작은 크기 = P 모양)을 알림 영역 크기에 맞춰 그대로 씀
-        try
-        {
-            var exe = Environment.ProcessPath;
-            int size = WF.SystemInformation.SmallIconSize.Width;
-            if (exe != null && Icon.ExtractIcon(exe, 0, size) is { } appIcon) return appIcon;
-        }
-        catch { }
-
-        // 혹시 못 꺼내면 예전처럼 직접 그림
-        var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            using var br = new LinearGradientBrush(new Rectangle(0, 0, 32, 32), ToDrawing(Theme.TrayA), ToDrawing(Theme.TrayB), 45f);
-            g.FillEllipse(br, 1, 1, 30, 30);
-            g.FillRectangle(Brushes.White, 9, 9, 6, 6);
-            g.FillRectangle(Brushes.White, 17, 9, 6, 6);
-            g.FillRectangle(Brushes.White, 9, 17, 6, 6);
-            g.FillRectangle(Brushes.White, 17, 17, 6, 6);
-        }
-        return Icon.FromHandle(bmp.GetHicon());
-    }
-
-    public void Dispose()
-    {
-        icon.Visible = false;
-        icon.Dispose();
-    }
+	public void Dispose()
+	{
+		icon.Visible = false;
+		icon.Dispose();
+	}
 }

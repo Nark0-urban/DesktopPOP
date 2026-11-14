@@ -5,35 +5,71 @@ namespace DesktopPop;
 
 internal sealed class InputDialog : Window
 {
-    readonly TextBox box;
+	private readonly TextBox box;
 
-    InputDialog(string title, string prompt, string initial)
-    {
-        Title = title;
-        Width = 340;
-        SizeToContent = SizeToContent.Height;
-        ResizeMode = ResizeMode.NoResize;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Topmost = true;
+	private InputDialog(string title, string prompt, string initial)
+	{
+		Title = title;
+		Width = 340.0;
+		SizeToContent = SizeToContent.Height;
+		ResizeMode = ResizeMode.NoResize;
+		WindowStartupLocation = WindowStartupLocation.CenterScreen;
+		Topmost = true;
+		StackPanel stackPanel = new StackPanel
+		{
+			Margin = new Thickness(16.0)
+		};
+		stackPanel.Children.Add(new TextBlock
+		{
+			Text = prompt,
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		});
+		box = new TextBox
+		{
+			Text = initial,
+			Padding = new Thickness(4.0)
+		};
+		stackPanel.Children.Add(box);
+		StackPanel stackPanel2 = new StackPanel
+		{
+			Orientation = Orientation.Horizontal,
+			HorizontalAlignment = HorizontalAlignment.Right,
+			Margin = new Thickness(0.0, 12.0, 0.0, 0.0)
+		};
+		Button button = new Button
+		{
+			Content = "확인",
+			Width = 72.0,
+			IsDefault = true,
+			Margin = new Thickness(0.0, 0.0, 8.0, 0.0)
+		};
+		button.Click += (object s, RoutedEventArgs e) =>
+		{
+			DialogResult = true;
+		};
+		Button element = new Button
+		{
+			Content = "취소",
+			Width = 72.0,
+			IsCancel = true
+		};
+		stackPanel2.Children.Add(button);
+		stackPanel2.Children.Add(element);
+		stackPanel.Children.Add(stackPanel2);
+		Content = stackPanel;
+		Loaded += (object s, RoutedEventArgs e) =>
+		{
+			box.Focus();
+			box.SelectAll();
+		};
+	}
 
-        var sp = new StackPanel { Margin = new Thickness(16) };
-        sp.Children.Add(new TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 8) });
-        box = new TextBox { Text = initial, Padding = new Thickness(4) };
-        sp.Children.Add(box);
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
-        var ok = new Button { Content = "확인", Width = 72, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
-        ok.Click += (s, e) => DialogResult = true;
-        var cancel = new Button { Content = "취소", Width = 72, IsCancel = true };
-        buttons.Children.Add(ok);
-        buttons.Children.Add(cancel);
-        sp.Children.Add(buttons);
-        Content = sp;
-        Loaded += (s, e) => { box.Focus(); box.SelectAll(); };
-    }
-
-    public static string? Ask(string title, string prompt, string initial)
-    {
-        var d = new InputDialog(title, prompt, initial);
-        return d.ShowDialog() == true ? d.box.Text.Trim() : null;
-    }
+	public static string? Ask(string title, string prompt, string initial)
+	{
+		using (KeyboardHook.Suspend())
+		{
+			InputDialog inputDialog = new InputDialog(title, prompt, initial);
+			return (inputDialog.ShowDialog() == true) ? inputDialog.box.Text.Trim() : null;
+		}
+	}
 }

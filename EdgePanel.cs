@@ -1,532 +1,941 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
+using System.Windows.Threading;
 
 namespace DesktopPop;
 
-/// <summary>화면 왼쪽/오른쪽 끝에 마우스를 대면 튀어나오는 아이콘 판.</summary>
 internal sealed class EdgePanel : Window, ISelHost
 {
-    const double PadX = 6, PadY = 8, Fade = 40;
-    readonly RubberBand band;
+	private const double PadX = 6.0;
 
-    public readonly Side Side;
-    readonly Canvas canvas = new();
-    readonly Border bg = new();
-    readonly List<(Border tile, TranslateTransform tt, int col, int row, double off)> tiles = new();
-    int rows = 1;
-    bool shown;
-    bool dirty = true;
-    DateTime edgeSince = DateTime.MinValue, awaySince = DateTime.MinValue;
-    IntPtr hwnd;
-    int hideToken;
+	private const double PadY = 8.0;
 
-    public EdgePanel(Side side)
-    {
-        Side = side;
-        Title = "DesktopPop Edge";
-        WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
-        ShowInTaskbar = false;
-        Topmost = true;
-        ShowActivated = false;
-        ResizeMode = ResizeMode.NoResize;
+	private const double Fade = 40.0;
 
-        ApplyThemeBackground();
-        bg.Opacity = 0;
+	private readonly RubberBand band;
 
-        var root = new Grid { AllowDrop = true };
-        root.Children.Add(bg);
-        root.Children.Add(canvas);
-        DragEventHandler over = (s, e) =>
-        {
-            var keys = Tiles.KeysFrom(e.Data);
-            var files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            var target = DropTargetAt(e.GetPosition(canvas), keys, files);
-            SetDropHover(target?.tile);
-            var srcs = keys != null ? keys.Where(k => !k.StartsWith("::")).ToArray() : files;
-            if (target is { } tg && srcs is { Length: > 0 })
-                e.Effects = tg.item.Key == ItemStore.RecycleBinKey || !WantsCopy(e, srcs, tg.item.Path) ? DragDropEffects.Move : DragDropEffects.Copy;
-            else if (keys != null) e.Effects = DragDropEffects.Move;          // 자리 바꾸기
-            else if (files is { Length: > 0 })
-                e.Effects = WantsCopy(e, files, App.DesktopDir) ? DragDropEffects.Copy : DragDropEffects.Move;
-            else e.Effects = DragDropEffects.None;
-            e.Effects &= e.AllowedEffects;
-            e.Handled = true;
-        };
-        root.DragEnter += over;
-        root.DragOver += over;
-        root.DragLeave += (s, e) => SetDropHover(null);
-        root.Drop += OnDrop;
-        root.MouseRightButtonUp += (s, e) =>
-        {
-            // 빈 곳 우클릭 = 새 폴더 / 붙여넣기 / 바탕화면 폴더 열기
-            var cm = BackgroundMenu(IndexAt(e.GetPosition(canvas)));
-            App.Track(cm);
-            cm.PlacementTarget = root;
-            cm.IsOpen = true;
-            e.Handled = true;
-        };
-        Content = root;
-        // 빈 곳을 끌면 네모로 여러 개 선택, 그냥 클릭하면 선택 풀기
-        band = new RubberBand(root, canvas, this) { OnClick = () => Sel.Clear(this) };
+	public readonly Side Side;
 
-        SourceInitialized += (s, e) =>
-        {
-            hwnd = new WindowInteropHelper(this).Handle;
-            Native.MakeToolWindow(hwnd);
-        };
-    }
+	private readonly Canvas canvas = new Canvas();
 
-    // ---------- 여러 개 선택 ----------
+	private readonly Border bg = new Border();
 
-    public IReadOnlyList<string> OrderedKeys => tiles.Select(t => ((DesktopItem)t.tile.Tag).Key).ToList();
-    public bool BandSelectable => shown && IsVisible;
+	private readonly List<(Border tile, TranslateTransform tt, int col, int row, double off)> tiles = new List<(Border, TranslateTransform, int, int, double)>();
 
-    public Border? TileOf(string key)
-    {
-        foreach (var t in tiles)
-            if (t.tile.Tag is DesktopItem it && string.Equals(it.Key, key, StringComparison.OrdinalIgnoreCase)) return t.tile;
-        return null;
-    }
+	private readonly Dictionary<string, Border> tileByKey = new Dictionary<string, Border>(StringComparer.OrdinalIgnoreCase);
 
-    public void ApplySelection()
-    {
-        foreach (var t in tiles) Tiles.SetSelected(t.tile, Sel.Contains(this, ((DesktopItem)t.tile.Tag).Key));
-    }
+	private TilePresentation[] presentations = Array.Empty<TilePresentation>();
 
-    /// <summary>판 배경을 지금 테마 색으로 (가장자리 쪽이 진하고 안쪽으로 갈수록 투명).</summary>
-    void ApplyThemeBackground()
-    {
-        bool left = Side == Side.Left;
-        var c = Theme.Panel;
-        var g = new LinearGradientBrush { StartPoint = new Point(left ? 0 : 1, 0.5), EndPoint = new Point(left ? 1 : 0, 0.5) };
-        g.GradientStops.Add(new GradientStop(Theme.WithAlpha(c, 0xC0), 0));
-        g.GradientStops.Add(new GradientStop(Theme.WithAlpha(c, 0x88), 0.72));
-        g.GradientStops.Add(new GradientStop(Theme.WithAlpha(c, 0x02), 1));
-        g.Freeze();
-        bg.Background = g;
-    }
+	private string[] orderedKeys = Array.Empty<string>();
 
-    public void ApplyTheme()
-    {
-        ApplyThemeBackground();
-        MarkDirty();
-    }
+	private int rows = 1;
 
-    public void MarkDirty()
-    {
-        dirty = true;
-        if (shown)
-        {
-            Layout();
-            foreach (var t in tiles)
-            {
-                t.tt.X = 0;
-                t.tile.Opacity = 1;
-                // 아직 날아오는 중인 아이콘은 빈자리로 둠
-                if (flying.ContainsKey(((DesktopItem)t.tile.Tag).Key)) t.tile.BeginAnimation(OpacityProperty, Anim.To(0, 1));
-            }
-            RedrawHighlights();
-        }
-    }
+	private bool shown;
 
-    void Layout()
-    {
-        dirty = false;
-        var app = App.Instance;
-        var wa = SystemParameters.WorkArea;
-        var (top, height) = VerticalRange();
-        var list = app.Store.VisibleFor(app.Config, Side);
-        rows = Math.Max(1, (int)((height - PadY * 2) / Tiles.H));
-        int cols = Math.Max(1, (list.Count + rows - 1) / rows);
-        Width = cols * Tiles.W + PadX * 2 + Fade;
-        Height = height;
-        Top = top;
-        Left = Side == Side.Left ? wa.Left : wa.Right - Width;
+	private bool dirty = true;
 
-        canvas.Children.Clear();
-        tiles.Clear();
-        for (int i = 0; i < list.Count; i++)
-        {
-            var item = list[i];
-            int col = i / rows, row = i % rows;
-            double x = Side == Side.Left ? PadX + col * Tiles.W : Width - PadX - (col + 1) * Tiles.W;
-            double y = PadY + row * Tiles.H;
-            var tile = Tiles.Create(item, false);
-            Tiles.Attach(tile, item, this, HidePanel, () => BuildExtras(item));
-            Canvas.SetLeft(tile, x + 3);
-            Canvas.SetTop(tile, y + 3);
-            double off = Side == Side.Left ? -(x + Tiles.W + 10) : (Width - x + 10);
-            var tt = new TranslateTransform(off, 0);
-            tile.RenderTransform = tt;
-            tile.Opacity = 0;
-            canvas.Children.Add(tile);
-            tiles.Add((tile, tt, col, row, off));
-        }
-        ApplySelection();
-    }
+	private DateTime edgeSince = DateTime.MinValue;
 
-    /// <summary>작업 표시줄과 절대 겹치지 않는 세로 범위 (DIP).</summary>
-    static (double top, double height) VerticalRange()
-    {
-        var wa = SystemParameters.WorkArea;
-        double top = wa.Top, bottom = wa.Bottom;
-        if (Native.TryGetTaskbarRect(out var tb))
-        {
-            var mon = Native.PrimaryMonitorRect();
-            double scale = (mon.Right - mon.Left) / SystemParameters.PrimaryScreenWidth;
-            bool horizontal = (tb.Right - tb.Left) > (tb.Bottom - tb.Top);
-            if (horizontal && scale > 0)
-            {
-                // 자동 숨김 작업 표시줄이면 올라왔을 때 높이(약 48)만큼 비워 둠
-                bool autoHidden = (Math.Min(tb.Bottom, mon.Bottom) - Math.Max(tb.Top, mon.Top)) < 10;
-                if (tb.Top > (mon.Top + mon.Bottom) / 2 || autoHidden && tb.Top >= mon.Bottom - 10)
-                    bottom = Math.Min(bottom, autoHidden ? mon.Bottom / scale - 52 : tb.Top / scale);
-                else
-                    top = Math.Max(top, autoHidden ? mon.Top / scale + 52 : tb.Bottom / scale);
-            }
-        }
-        return (top, Math.Max(Tiles.H + PadY * 2, bottom - top));
-    }
+	private DateTime awaySince = DateTime.MinValue;
 
-    void ShowPanel()
-    {
-        if (dirty) Layout();
-        if (tiles.Count == 0) return;
-        shown = true;
-        hideToken++;
-        if (!IsVisible) Show();
-        Native.SetTopmost(hwnd);
+	private nint hwnd;
 
-        bg.BeginAnimation(OpacityProperty, Anim.To(1, 200));
-        foreach (var t in tiles)
-        {
-            double delay = t.row * 14 + t.col * 55;
-            t.tt.BeginAnimation(TranslateTransform.XProperty,
-                Anim.To(0, 430, delay, new BackEase { Amplitude = 0.55, EasingMode = EasingMode.EaseOut }));
-            bool isFlying = flying.ContainsKey(((DesktopItem)t.tile.Tag).Key);
-            t.tile.BeginAnimation(OpacityProperty, isFlying ? Anim.To(0, 1) : Anim.To(1, 220, delay));
-        }
-    }
+	private int hideToken;
 
-    DateTime peekUntil = DateTime.MinValue;
+	private bool closed;
 
-    /// <summary>잠깐 튀어나와서 "여기 들어왔어요" 보여 주고 다시 들어감.</summary>
-    public void Peek()
-    {
-        peekUntil = DateTime.UtcNow.AddMilliseconds(1600);
-        if (!shown) ShowPanel();
-    }
+	private DateTime peekUntil = DateTime.MinValue;
 
-    public void HidePanel()
-    {
-        if (!shown) return;
-        shown = false;
-        Sel.Clear(this);
-        int token = ++hideToken;
-        int maxRow = 0;
-        foreach (var t in tiles)
-        {
-            maxRow = Math.Max(maxRow, t.row);
-            double delay = t.row * 6;
-            t.tt.BeginAnimation(TranslateTransform.XProperty,
-                Anim.To(t.off, 220, delay, new QuadraticEase { EasingMode = EasingMode.EaseIn }));
-            t.tile.BeginAnimation(OpacityProperty, Anim.To(0, 220, delay));
-        }
-        bg.BeginAnimation(OpacityProperty, Anim.To(0, 260));
-        Anim.After(280 + maxRow * 6, () =>
-        {
-            if (token == hideToken && !shown) Hide();
-        });
-    }
+	private Border? hoverTile;
 
-    /// <summary>30ms마다 호출. 커서 위치(물리 픽셀) 기준으로 열고 닫음.</summary>
-    public void Tick(Native.POINT p, Native.RECT mon, bool lbtn, DateTime now)
-    {
-        var app = App.Instance;
-        bool inTaskbar = Native.InTaskbar(p);
-        if (!shown)
-        {
-            bool atEdge = (Side == Side.Left ? p.X <= mon.Left + 1 : p.X >= mon.Right - 2)
-                          && p.Y >= mon.Top && p.Y < mon.Bottom
-                          && !inTaskbar; // 시작 버튼·바탕화면 보기 버튼 쪽은 무시
-            // 탐색기에서 파일을 끌고 오는 중이면(드래그 모양 커서) 버튼을 누른 상태여도 튀어나옴
-            bool externalDrag = atEdge && lbtn && App.DragSource == null && Native.LooksLikeDragCursor();
-            // 선택 네모를 끌다가 화면 끝에 닿아도 열림
-            bool dragging = App.DragSource != null || externalDrag || DesktopBand.IsActive;
-            bool allowed = atEdge
-                           && (!lbtn || dragging)
-                           && App.OpenMenus == 0
-                           // 끌고 오는 중엔 최대화된 탐색기 창 위에서도 나오게
-                           && !Native.ShouldBlock(mon, app.Config.DisableInFullscreen, app.Config.BlockWhenMaximized && !dragging);
-            if (!allowed) { edgeSince = DateTime.MinValue; return; }
-            if (edgeSince == DateTime.MinValue) edgeSince = now;
-            double delay = externalDrag ? Math.Max(250, app.Config.EdgeDelayMs) : app.Config.EdgeDelayMs;
-            if ((now - edgeSince).TotalMilliseconds >= delay)
-            {
-                edgeSince = DateTime.MinValue;
-                awaySince = DateTime.MinValue;
-                ShowPanel();
-            }
-        }
-        else
-        {
-            if (hwnd == IntPtr.Zero) return;
-            // 작업 표시줄로 내려가면 바로 비켜 줌 (시작 메뉴 등을 가리지 않게)
-            if (inTaskbar && App.OpenMenus == 0 && App.DragSource == null) { awaySince = DateTime.MinValue; HidePanel(); return; }
-            Native.GetWindowRect(hwnd, out var r);
-            const int margin = 24;
-            bool inside = p.X >= r.Left - margin && p.X <= r.Right + margin && p.Y >= r.Top - margin && p.Y <= r.Bottom + margin;
-            if (inside || App.OpenMenus > 0 || App.DragSource == this || band.IsActive || Sel.Host == this || now < peekUntil) { awaySince = DateTime.MinValue; return; }
-            if (awaySince == DateTime.MinValue) awaySince = now;
-            if ((now - awaySince).TotalMilliseconds >= 350) { awaySince = DateTime.MinValue; HidePanel(); }
-        }
-    }
+	private Brush? hoverOldBg;
 
-    int IndexAt(Point pos)
-    {
-        double cx = Side == Side.Left ? (pos.X - PadX) / Tiles.W : (Width - PadX - pos.X) / Tiles.W;
-        int col = Math.Max(0, (int)Math.Floor(cx));
-        int row = Math.Clamp((int)Math.Floor((pos.Y - PadY) / Tiles.H), 0, rows - 1);
-        return col * rows + row;
-    }
+	private Brush? hoverOldBorder;
 
-    /// <summary>탐색기와 같은 규칙: 같은 드라이브면 옮기기, 다른 드라이브면 복사. Ctrl=복사, Shift=옮기기.</summary>
-    static bool WantsCopy(DragEventArgs e, string[] files, string destDir)
-    {
-        if ((e.KeyStates & DragDropKeyStates.ControlKey) != 0) return true;
-        if ((e.KeyStates & DragDropKeyStates.ShiftKey) != 0) return false;
-        var srcRoot = System.IO.Path.GetPathRoot(files[0]) ?? "";
-        var dstRoot = System.IO.Path.GetPathRoot(destDir) ?? "";
-        return !string.Equals(srcRoot, dstRoot, StringComparison.OrdinalIgnoreCase);
-    }
+	private readonly Dictionary<string, int> flying = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// 끌고 있는 위치가 폴더나 휴지통 아이콘 "한가운데"면 그 아이콘을 돌려줌 (= 그 안에 넣기).
-    /// 아이콘 가장자리 쪽이면 null (= 그 자리로 순서 바꾸기).
-    /// </summary>
-    (Border tile, DesktopItem item)? DropTargetAt(Point pos, string[]? draggedKeys, string[]? files)
-    {
-        int idx = IndexAt(pos);
-        if (idx < 0 || idx >= tiles.Count) return null;
-        var tile = tiles[idx].tile;
-        if (tile.Tag is not DesktopItem item) return null;
-        if (draggedKeys != null && draggedKeys.Any(k => string.Equals(k, item.Key, StringComparison.OrdinalIgnoreCase))) return null;
-        bool isBin = item.Key == ItemStore.RecycleBinKey;
-        bool isDir = !item.IsVirtual && System.IO.Directory.Exists(item.Path);
-        if (!isBin && !isDir) return null;
-        var srcs = (draggedKeys ?? files ?? Array.Empty<string>()).Where(k => !k.StartsWith("::")).ToArray();
-        if (srcs.Length == 0) return null;
-        if (isDir && srcs.Any(s =>
-            string.Equals(s.TrimEnd('\\'), item.Path, StringComparison.OrdinalIgnoreCase) ||
-            item.Path.StartsWith(s.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))) return null;
+	private readonly Dictionary<string, DateTime> highlights = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
-        double x = Canvas.GetLeft(tile), y = Canvas.GetTop(tile);
-        const double inset = 14;
-        if (pos.X < x + inset || pos.X > x + tile.Width - inset || pos.Y < y + 4 || pos.Y > y + tile.Height - inset) return null;
-        return (tile, item);
-    }
+	private readonly List<UIElement> highlightRings = new List<UIElement>();
 
-    Border? hoverTile;
-    Brush? hoverOldBg, hoverOldBorder;
+	private bool highlightRedrawQueued;
 
-    /// <summary>"여기 넣을 수 있어요" — 폴더/휴지통 아이콘을 테마 색으로.</summary>
-    void SetDropHover(Border? tile)
-    {
-        if (tile == hoverTile) return;
-        if (hoverTile != null) { hoverTile.Background = hoverOldBg; hoverTile.BorderBrush = hoverOldBorder; }
-        hoverTile = tile;
-        if (tile != null)
-        {
-            hoverOldBg = tile.Background;
-            hoverOldBorder = tile.BorderBrush;
-            tile.Background = Theme.Brush(Theme.Accent, 0x55);
-            tile.BorderBrush = Theme.Brush(Theme.Accent);
-        }
-    }
+	private bool redrawScheduled;
 
-    void OnDrop(object sender, DragEventArgs e)
-    {
-        var pos = e.GetPosition(canvas);
-        int index = IndexAt(pos);
-        var keys = Tiles.KeysFrom(e.Data);
-        var files = e.Data.GetData(DataFormats.FileDrop) as string[];
-        var target = DropTargetAt(pos, keys, files);
-        SetDropHover(null);
-        var app = App.Instance;
+	public Native.MonitorInfo Monitor { get; private set; }
 
-        if (target is { } tg)
-        {
-            var folder = tg.item;
-            // 폴더/휴지통 안으로 넣기 (실제 작업은 끌기가 끝난 뒤에)
-            var srcs = (keys ?? files!).Where(k => !k.StartsWith("::")).ToArray();
-            bool bin = folder.Key == ItemStore.RecycleBinKey;
-            bool copy = !bin && WantsCopy(e, srcs, folder.Path);
-            Dispatcher.InvokeAsync(() =>
-            {
-                if (bin) app.RecycleFiles(srcs);
-                else app.TransferFiles(srcs, folder.Path, copy);
-            });
-            e.Effects = keys != null ? DragDropEffects.Move : DragDropEffects.Copy & e.AllowedEffects;
-        }
-        else if (keys != null)
-        {
-            app.MoveManyToSide(keys, Side, index);
-            e.Effects = DragDropEffects.Move;
-        }
-        else if (files is { Length: > 0 })
-        {
-            bool copy = WantsCopy(e, files, App.DesktopDir);
-            Dispatcher.InvokeAsync(() => app.BringFilesToDesktop(files, copy, Side, index));
-            // 탐색기한테는 "복사"라고 알려야 원본을 지우지 않음 (옮기기는 우리가 직접 함)
-            e.Effects = DragDropEffects.Copy & e.AllowedEffects;
-        }
-        e.Handled = true;
-    }
+	public Native.RECT Bounds => Monitor.Bounds;
 
-    // ---------- 새로 들어온 아이콘 보여 주기 ----------
+	public PanelConfig Placement => App.Instance.Config.GetPanel(Monitor.DeviceName, Side);
 
-    /// <summary>날아오는 중인 아이콘 (판이 다시 그려져도 빈자리로 유지하려고).</summary>
-    readonly Dictionary<string, int> flying = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>반짝이는 중인 아이콘과 끝나는 시각 (판이 다시 그려져도 이어서 반짝이게).</summary>
-    readonly Dictionary<string, DateTime> highlights = new(StringComparer.OrdinalIgnoreCase);
-    readonly List<UIElement> highlightRings = new();
+	public bool IsForcedOpen { get; private set; }
 
-    /// <summary>가장자리를 열고, 새 아이콘 자리를 반짝 강조. fly면 from(마우스/놓은 위치)에서 날아와서 자리에 앉음.</summary>
-    public void RevealArrivals(List<(string key, bool fly)> items, Point from)
-    {
-        bool wasShown = shown;
-        peekUntil = DateTime.UtcNow.AddMilliseconds(3200);
-        if (!shown) ShowPanel();
-        if (!shown) return;
-        int n = 0;
-        foreach (var (key, fly) in items)
-        {
-            var tile = TileOf(key);
-            if (tile == null) continue;
+	public bool IsShown => shown;
 
-            if (fly && n < 12)
-            {
-                double delay = n++ * 90;
-                flying[key] = flying.TryGetValue(key, out var c) ? c + 1 : 1;
-                tile.BeginAnimation(OpacityProperty, Anim.To(0, 1)); // 날아와서 앉을 때까지 빈자리
-                var to = new Point(Left + Canvas.GetLeft(tile) + tile.Width / 2, Top + Canvas.GetTop(tile) + tile.Height / 2);
-                FlyOverlay.Fly((DesktopItem)tile.Tag, from, to, delay, () =>
-                {
-                    if (flying.TryGetValue(key, out var left) && --left > 0) flying[key] = left;
-                    else flying.Remove(key);
-                    var cur = TileOf(key); // 그새 판이 다시 그려졌을 수 있어서 지금 칸을 다시 찾음
-                    if (cur == null) return;
-                    if (!flying.ContainsKey(key)) cur.BeginAnimation(OpacityProperty, Anim.To(1, 80));
-                    Highlight(key);
-                    peekUntil = DateTime.UtcNow.AddMilliseconds(1800);
-                });
-            }
-            else
-            {
-                Anim.After(wasShown ? 60 : 700, () => Highlight(key)); // 판이 다 튀어나온 뒤에
-            }
-        }
-    }
+	public IReadOnlyList<string> OrderedKeys => orderedKeys;
 
-    void Highlight(string key)
-    {
-        highlights[key] = DateTime.UtcNow.AddMilliseconds(2200);
-        RedrawHighlights();
-    }
+	public bool BandSelectable
+	{
+		get
+		{
+			if (shown)
+			{
+				return IsVisible;
+			}
+			return false;
+		}
+	}
 
-    /// <summary>반짝이는 중인 아이콘마다 고리 + 빛. 판이 다시 그려진 뒤에도 남은 시간만큼 이어서.</summary>
-    void RedrawHighlights()
-    {
-        foreach (var r in highlightRings) canvas.Children.Remove(r);
-        highlightRings.Clear();
-        var now = DateTime.UtcNow;
-        foreach (var (key, until) in highlights.ToList())
-        {
-            var remaining = (until - now).TotalMilliseconds;
-            var tile = TileOf(key);
-            if (remaining <= 50 || tile == null)
-            {
-                highlights.Remove(key);
-                if (tile?.Effect is DropShadowEffect) tile.Effect = null;
-                continue;
-            }
-            var accent = Theme.Accent;
-            var st = new ScaleTransform(1, 1);
-            var ring = new Border
-            {
-                Width = tile.Width + 10, Height = tile.Height + 10,
-                CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(3),
-                BorderBrush = new SolidColorBrush(accent), IsHitTestVisible = false,
-                RenderTransformOrigin = new Point(0.5, 0.5), RenderTransform = st
-            };
-            Canvas.SetLeft(ring, Canvas.GetLeft(tile) - 5);
-            Canvas.SetTop(ring, Canvas.GetTop(tile) - 5);
-            canvas.Children.Add(ring);
-            highlightRings.Add(ring);
-            var grow = new DoubleAnimation(1, 1.22, TimeSpan.FromMilliseconds(700))
-            {
-                RepeatBehavior = new RepeatBehavior(TimeSpan.FromMilliseconds(remaining)),
-                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
-            };
-            st.BeginAnimation(ScaleTransform.ScaleXProperty, grow);
-            st.BeginAnimation(ScaleTransform.ScaleYProperty, grow);
-            ring.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(700)) { RepeatBehavior = new RepeatBehavior(TimeSpan.FromMilliseconds(remaining)) });
-            tile.Effect = new DropShadowEffect { Color = accent, ShadowDepth = 0, BlurRadius = 24, Opacity = 1 };
-        }
-        if (highlights.Count > 0 && !redrawScheduled)
-        {
-            redrawScheduled = true;
-            Anim.After(highlights.Values.Min(u => (u - now).TotalMilliseconds) + 30, () => { redrawScheduled = false; RedrawHighlights(); });
-        }
-    }
+	public EdgePanel(Side side)
+		: this(side, Native.Monitors()[0])
+	{
+	}
 
-    bool redrawScheduled;
+	public EdgePanel(Side side, Native.MonitorInfo monitor)
+	{
+		Side = side;
+		Monitor = monitor;
+		Title = $"DesktopPop Edge {monitor.DeviceName} {side}";
+		WindowStyle = WindowStyle.None;
+		AllowsTransparency = true;
+		Background = Brushes.Transparent;
+		ShowInTaskbar = false;
+		Topmost = true;
+		ShowActivated = false;
+		ResizeMode = ResizeMode.NoResize;
+		ApplyThemeBackground();
+		bg.Opacity = 0.0;
+		Grid root = new Grid
+		{
+			AllowDrop = true
+		};
+		root.Children.Add(bg);
+		root.Children.Add(canvas);
+		DragEventHandler value = (object s, DragEventArgs e) =>
+		{
+			string[] array = Tiles.KeysFrom(e.Data);
+			string[] array2 = e.Data.GetData(DataFormats.FileDrop) as string[];
+			(Border, DesktopItem)? tuple = DropTargetAt(e.GetPosition(canvas), array, array2);
+			SetDropHover(tuple?.Item1);
+			string[] array3 = ((array != null) ? array.Where((string k) => !k.StartsWith("::")).ToArray() : array2);
+			if (tuple.HasValue)
+			{
+				(Border, DesktopItem) valueOrDefault = tuple.GetValueOrDefault();
+				if (array3 != null && array3.Length > 0)
+				{
+					e.Effects = ((!(valueOrDefault.Item2.Key == "::{645FF040-5081-101B-9F08-00AA002F954E}") && WantsCopy(e, array3, valueOrDefault.Item2.Path)) ? DragDropEffects.Copy : DragDropEffects.Move);
+					goto IL_0110;
+				}
+			}
+			if (array != null)
+			{
+				e.Effects = DragDropEffects.Move;
+			}
+			else if (array2 != null && array2.Length > 0)
+			{
+				e.Effects = (WantsCopy(e, array2, App.DesktopDir) ? DragDropEffects.Copy : DragDropEffects.Move);
+			}
+			else
+			{
+				e.Effects = DragDropEffects.None;
+			}
+			goto IL_0110;
+			IL_0110:
+			e.Effects &= e.AllowedEffects;
+			e.Handled = true;
+		};
+		root.DragEnter += value;
+		root.DragOver += value;
+		root.DragLeave += (object s, DragEventArgs e) =>
+		{
+			SetDropHover(null);
+		};
+		root.Drop += OnDrop;
+		root.MouseRightButtonUp += (object s, MouseButtonEventArgs e) =>
+		{
+			ContextMenu contextMenu = BackgroundMenu(IndexAt(e.GetPosition(canvas)));
+			App.Track(contextMenu);
+			contextMenu.PlacementTarget = root;
+			contextMenu.IsOpen = true;
+			e.Handled = true;
+		};
+		Content = root;
+		band = new RubberBand(root, canvas, this)
+		{
+			OnClick = () =>
+			{
+				Sel.Clear(this);
+			}
+		};
+		SourceInitialized += (object? s, EventArgs e) =>
+		{
+			hwnd = new WindowInteropHelper(this).Handle;
+			Native.MakeToolWindow(hwnd);
+		};
+		Closed += (object? s, EventArgs e) =>
+		{
+			closed = true;
+			shown = false;
+			hideToken++;
+			Sel.Clear(this);
+		};
+	}
 
-    // ---------- 메뉴 ----------
+	public void UpdateMonitor(Native.MonitorInfo monitor)
+	{
+		Monitor = monitor;
+		edgeSince = (awaySince = DateTime.MinValue);
+		MarkDirty();
+	}
 
-    /// <summary>우클릭한 아이콘이 여러 개 선택 중 하나면 선택된 것 전부, 아니면 그것 하나.</summary>
-    List<string> TargetsFor(DesktopItem item) =>
-        Sel.Contains(this, item.Key) && Sel.Keys.Count > 1 ? Sel.Ordered(this) : new List<string> { item.Key };
+	public void ForceOpen(bool value)
+	{
+		if (closed)
+		{
+			return;
+		}
+		IsForcedOpen = value;
+		edgeSince = (awaySince = (peekUntil = DateTime.MinValue));
+		if (value)
+		{
+			if (!shown)
+			{
+				ShowPanel();
+			}
+		}
+		else
+		{
+			HidePanel();
+		}
+	}
 
-    ContextMenu BackgroundMenu(int index)
-    {
-        var app = App.Instance;
-        var cm = new ContextMenu();
-        cm.Items.Add(Tiles.Item("새 폴더", () => app.CreateNewFolder(Side, index)));
-        var paste = Tiles.Item("붙여넣기", () => app.PasteToDesktop(Side, index));
-        paste.IsEnabled = App.ClipboardHasFiles();
-        cm.Items.Add(paste);
-        cm.Items.Add(new Separator());
-        cm.Items.Add(Tiles.Item("바탕화면 폴더 열기", app.OpenDesktopFolder));
-        return cm;
-    }
+	public void DisposePanel()
+	{
+		if (!closed)
+		{
+			IsForcedOpen = false;
+			closed = true;
+			shown = false;
+			hideToken++;
+			Sel.Clear(this);
+			Close();
+		}
+	}
 
-    /// <summary>Windows 원래 메뉴 맨 위에 붙는 DesktopPop 전용 항목.</summary>
-    List<MenuEntry> BuildExtras(DesktopItem item)
-    {
-        var app = App.Instance;
-        var targets = TargetsFor(item);
-        string count = targets.Count > 1 ? $" ({targets.Count}개)" : "";
+	public Border? TileOf(string key)
+	{
+		if (!tileByKey.TryGetValue(key, out Border value))
+		{
+			return null;
+		}
+		return value;
+	}
 
-        var bags = app.Config.Bags.Select(b => MenuEntry.Item(b.Name, () => app.MoveManyToBag(targets, b))).ToList();
-        if (bags.Count > 0) bags.Add(MenuEntry.Separator);
-        bags.Add(MenuEntry.Item("새 가방 만들어서 넣기...", () => app.CreateBag(targets)));
+	internal void RefreshItems()
+	{
+		if (!closed && (dirty || !TilePresentation.Matches(presentations, App.Instance.Store.VisibleFor(Placement))))
+		{
+			MarkDirty();
+		}
+	}
 
-        var other = Side == Side.Left ? Side.Right : Side.Left;
-        return new List<MenuEntry>
-        {
-            MenuEntry.Sub("가방에 넣기" + count, bags),
-            MenuEntry.Item((Side == Side.Left ? "오른쪽 가장자리로 보내기" : "왼쪽 가장자리로 보내기") + count,
-                () => app.MoveManyToSide(targets, other, null)),
-        };
-    }
+	public void ApplySelection()
+	{
+		foreach (var tile in tiles)
+		{
+			Tiles.SetSelected(tile.tile, Sel.Contains(this, ((DesktopItem)tile.tile.Tag).Key));
+		}
+	}
+
+	private void ApplyThemeBackground()
+	{
+		bool flag = Side == Side.Left;
+		Color panel = Theme.Panel;
+		LinearGradientBrush linearGradientBrush = new LinearGradientBrush
+		{
+			StartPoint = new Point((!flag) ? 1 : 0, 0.5),
+			EndPoint = new Point(flag ? 1 : 0, 0.5)
+		};
+		linearGradientBrush.GradientStops.Add(new GradientStop(Theme.WithAlpha(panel, 192), 0.0));
+		linearGradientBrush.GradientStops.Add(new GradientStop(Theme.WithAlpha(panel, 136), 0.72));
+		linearGradientBrush.GradientStops.Add(new GradientStop(Theme.WithAlpha(panel, 2), 1.0));
+		linearGradientBrush.Freeze();
+		bg.Background = linearGradientBrush;
+	}
+
+	public void ApplyTheme()
+	{
+		ApplyThemeBackground();
+		MarkDirty();
+	}
+
+	public void MarkDirty()
+	{
+		if (closed)
+		{
+			return;
+		}
+		dirty = true;
+		PrepareOpen();
+		if (!shown)
+		{
+			return;
+		}
+		foreach (var tile in tiles)
+		{
+			tile.tt.X = 0.0;
+			tile.tile.Opacity = 1.0;
+			if (flying.ContainsKey(((DesktopItem)tile.tile.Tag).Key))
+			{
+				tile.tile.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.0, 1.0));
+			}
+		}
+		QueueHighlightRedraw();
+	}
+
+	internal void PrepareOpen()
+	{
+		if (!closed && dirty)
+		{
+			Layout();
+		}
+	}
+
+	private void Layout()
+	{
+		dirty = false;
+		App instance = App.Instance;
+		Rect rect = Native.ToDipRect(Monitor.WorkArea);
+		(double top, double height) tuple = VerticalRange();
+		double item = tuple.top;
+		double item2 = tuple.height;
+		List<DesktopItem> list = instance.Store.VisibleFor(Placement);
+		rows = Math.Max(1, (int)((item2 - 16.0) / 98.0));
+		int num = Math.Max(1, (list.Count + rows - 1) / rows);
+		Width = ((list.Count == 0) ? 188.0 : ((double)num * 86.0 + 12.0 + 40.0));
+		Height = item2;
+		Top = item;
+		Left = ((Side == Side.Left) ? rect.Left : (rect.Right - Width));
+		canvas.Children.Clear();
+		tiles.Clear();
+		tileByKey.Clear();
+		presentations = list.Select(TilePresentation.Capture).ToArray();
+		orderedKeys = list.Select((DesktopItem desktopItem) => desktopItem.Key).ToArray();
+		if (list.Count == 0)
+		{
+			TextBlock element = new TextBlock
+			{
+				Text = instance.PanelLabel(this) + "\n\n아이콘을 여기로\n끌어 놓으세요",
+				Width = Width - 12.0 - 12.0,
+				FontSize = 12.0,
+				Foreground = Brushes.White,
+				Opacity = 0.8,
+				TextAlignment = TextAlignment.Center,
+				TextWrapping = TextWrapping.Wrap,
+				IsHitTestVisible = false
+			};
+			Canvas.SetLeft(element, 12.0);
+			Canvas.SetTop(element, 28.0);
+			canvas.Children.Add(element);
+		}
+		for (int num2 = 0; num2 < list.Count; num2++)
+		{
+			DesktopItem item3 = list[num2];
+			int num3 = num2 / rows;
+			int num4 = num2 % rows;
+			double num5 = ((Side == Side.Left) ? (6.0 + (double)num3 * 86.0) : (Width - 6.0 - (double)(num3 + 1) * 86.0));
+			double num6 = 8.0 + (double)num4 * 98.0;
+			Border border = Tiles.Create(item3, backdrop: false);
+			Tiles.Attach(border, item3, this, HidePanel, () => BuildExtras(item3));
+			Canvas.SetLeft(border, num5 + 3.0);
+			Canvas.SetTop(border, num6 + 3.0);
+			double num7 = ((Side == Side.Left) ? (0.0 - (num5 + 86.0 + 10.0)) : (Width - num5 + 10.0));
+			TranslateTransform item4 = (TranslateTransform)(border.RenderTransform = new TranslateTransform(num7, 0.0));
+			border.Opacity = 0.0;
+			canvas.Children.Add(border);
+			tiles.Add((border, item4, num3, num4, num7));
+			tileByKey.TryAdd(item3.Key, border);
+			border.Measure(new Size(border.Width, border.Height));
+			border.Arrange(new Rect(0.0, 0.0, border.Width, border.Height));
+		}
+		ApplySelection();
+	}
+
+	private (double top, double height) VerticalRange()
+	{
+		Rect rect = Native.ToDipRect(Monitor.WorkArea);
+		double num = rect.Top;
+		double num2 = rect.Bottom;
+		if (Native.TryGetTaskbarRect(Monitor, out var r))
+		{
+			Native.RECT bounds = Monitor.Bounds;
+			double num3 = Native.DipScale();
+			if (r.Right - r.Left > r.Bottom - r.Top && num3 > 0.0)
+			{
+				bool flag = Math.Min(r.Bottom, bounds.Bottom) - Math.Max(r.Top, bounds.Top) < 10;
+				if (r.Top > (bounds.Top + bounds.Bottom) / 2 || (flag && r.Top >= bounds.Bottom - 10))
+				{
+					num2 = Math.Min(num2, flag ? ((double)bounds.Bottom / num3 - 52.0) : ((double)r.Top / num3));
+				}
+				else
+				{
+					num = Math.Max(num, flag ? ((double)bounds.Top / num3 + 52.0) : ((double)r.Bottom / num3));
+				}
+			}
+		}
+		return (top: num, height: Math.Max(114.0, num2 - num));
+	}
+
+	private void ShowPanel()
+	{
+		if (closed)
+		{
+			return;
+		}
+		if (!IsForcedOpen)
+		{
+			if (!Native.GetCursorPos(out var p))
+			{
+				return;
+			}
+			Native.RECT bounds = Monitor.Bounds;
+			if (!Native.IsDesktopExposed(new Native.POINT
+			{
+				X = ((Side == Side.Left) ? bounds.Left : (bounds.Right - 1)),
+				Y = Math.Clamp(p.Y, bounds.Top, bounds.Bottom - 1)
+			}))
+			{
+				return;
+			}
+		}
+		if (dirty)
+		{
+			Layout();
+		}
+		shown = true;
+		hideToken++;
+		if (!IsVisible)
+		{
+			Show();
+		}
+		Native.SetTopmost(hwnd);
+		bg.BeginAnimation(UIElement.OpacityProperty, Anim.To(1.0, 200.0));
+		foreach (var tile in tiles)
+		{
+			double delayMs = tile.row * 14 + tile.col * 55;
+			tile.tt.BeginAnimation(TranslateTransform.XProperty, Anim.To(0.0, 430.0, delayMs, new BackEase
+			{
+				Amplitude = 0.55,
+				EasingMode = EasingMode.EaseOut
+			}));
+			bool flag = flying.ContainsKey(((DesktopItem)tile.tile.Tag).Key);
+			tile.tile.BeginAnimation(UIElement.OpacityProperty, flag ? Anim.To(0.0, 1.0) : Anim.To(1.0, 220.0, delayMs));
+		}
+	}
+
+	public void Peek()
+	{
+		if (!closed)
+		{
+			peekUntil = DateTime.UtcNow.AddMilliseconds(1600.0);
+			if (!shown)
+			{
+				ShowPanel();
+			}
+		}
+	}
+
+	public void HidePanel()
+	{
+		if (closed || IsForcedOpen || !shown)
+		{
+			return;
+		}
+		shown = false;
+		Sel.Clear(this);
+		int token = ++hideToken;
+		int num = 0;
+		foreach (var tile in tiles)
+		{
+			num = Math.Max(num, tile.row);
+			double delayMs = tile.row * 6;
+			tile.tt.BeginAnimation(TranslateTransform.XProperty, Anim.To(tile.off, 220.0, delayMs, new QuadraticEase
+			{
+				EasingMode = EasingMode.EaseIn
+			}));
+			tile.tile.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.0, 220.0, delayMs));
+		}
+		bg.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.0, 260.0));
+		Anim.After(280 + num * 6, () =>
+		{
+			if (!closed && token == hideToken && !shown)
+			{
+				Hide();
+				foreach (var tile2 in tiles)
+				{
+					tile2.tt.BeginAnimation(TranslateTransform.XProperty, null);
+					tile2.tile.BeginAnimation(UIElement.OpacityProperty, null);
+					tile2.tt.X = tile2.off;
+					tile2.tile.Opacity = 0.0;
+				}
+				bg.BeginAnimation(UIElement.OpacityProperty, null);
+				bg.Opacity = 0.0;
+			}
+		});
+	}
+
+	public void Tick(Native.POINT p, Native.RECT mon, bool lbtn, DateTime now)
+	{
+		Tick(p, lbtn, now);
+	}
+
+	public void Tick(Native.POINT p, bool lbtn, DateTime now)
+	{
+		if (closed)
+		{
+			return;
+		}
+		if (IsForcedOpen)
+		{
+			if (!shown)
+			{
+				ShowPanel();
+			}
+			return;
+		}
+		App instance = App.Instance;
+		Native.RECT bounds = Monitor.Bounds;
+		bool flag = Native.TryGetEdgeProbe(p, bounds, Side, instance.EdgePanels.Select((EdgePanel panel) => panel.Bounds), out var probe);
+		if (!shown)
+		{
+			if (!flag || !Native.IsDesktopExposed(probe))
+			{
+				edgeSince = DateTime.MinValue;
+				return;
+			}
+			bool flag2 = (flag & lbtn) && App.DragSource == null && Native.LooksLikeDragCursor();
+			bool flag3 = ((App.DragSource != null) | flag2) || DesktopBand.IsActive;
+			if (!flag || !(!lbtn | flag3) || App.OpenMenus != 0)
+			{
+				edgeSince = DateTime.MinValue;
+				return;
+			}
+			if (edgeSince == DateTime.MinValue)
+			{
+				edgeSince = now;
+			}
+			double num = (flag2 ? Math.Max(250, instance.Config.EdgeDelayMs) : instance.Config.EdgeDelayMs);
+			if ((now - edgeSince).TotalMilliseconds >= num)
+			{
+				edgeSince = DateTime.MinValue;
+				awaySince = DateTime.MinValue;
+				ShowPanel();
+			}
+		}
+		else
+		{
+			if (hwnd == IntPtr.Zero)
+			{
+				return;
+			}
+			if (App.OpenMenus > 0 || App.DragSource != null || band.IsActive || (lbtn && Native.LooksLikeDragCursor()) || KeyboardHook.IsSuspended)
+			{
+				awaySince = DateTime.MinValue;
+				return;
+			}
+			if (!flag)
+			{
+				probe = new Native.POINT
+				{
+					X = ((Side == Side.Left) ? bounds.Left : (bounds.Right - 1)),
+					Y = Math.Clamp(p.Y, bounds.Top, bounds.Bottom - 1)
+				};
+			}
+			if (!Native.IsDesktopExposed(probe))
+			{
+				awaySince = DateTime.MinValue;
+				HidePanel();
+				return;
+			}
+			Native.GetWindowRect(hwnd, out var r);
+			if (flag || (Native.Contains(bounds, p) && p.X >= r.Left - 24 && p.X <= r.Right + 24 && p.Y >= r.Top - 24 && p.Y <= r.Bottom + 24) || now < peekUntil)
+			{
+				awaySince = DateTime.MinValue;
+				return;
+			}
+			if (awaySince == DateTime.MinValue)
+			{
+				awaySince = now;
+			}
+			if ((now - awaySince).TotalMilliseconds >= 350.0)
+			{
+				awaySince = DateTime.MinValue;
+				HidePanel();
+			}
+		}
+	}
+
+	private int IndexAt(Point pos)
+	{
+		double d = ((Side == Side.Left) ? ((pos.X - 6.0) / 86.0) : ((Width - 6.0 - pos.X) / 86.0));
+		int num = Math.Max(0, (int)Math.Floor(d));
+		int num2 = Math.Clamp((int)Math.Floor((pos.Y - 8.0) / 98.0), 0, rows - 1);
+		return num * rows + num2;
+	}
+
+	private static bool WantsCopy(DragEventArgs e, string[] files, string destDir)
+	{
+		if ((e.KeyStates & DragDropKeyStates.ControlKey) != 0)
+		{
+			return true;
+		}
+		if ((e.KeyStates & DragDropKeyStates.ShiftKey) != 0)
+		{
+			return false;
+		}
+		string? a = Path.GetPathRoot(files[0]) ?? "";
+		string b = Path.GetPathRoot(destDir) ?? "";
+		return !string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private (Border tile, DesktopItem item)? DropTargetAt(Point pos, string[]? draggedKeys, string[]? files)
+	{
+		int num = IndexAt(pos);
+		if (num < 0 || num >= tiles.Count)
+		{
+			return null;
+		}
+		Border item = tiles[num].tile;
+		object tag = item.Tag;
+		DesktopItem item2 = tag as DesktopItem;
+		if (item2 == null)
+		{
+			return null;
+		}
+		if (draggedKeys != null && draggedKeys.Any((string k) => string.Equals(k, item2.Key, StringComparison.OrdinalIgnoreCase)))
+		{
+			return null;
+		}
+		bool flag = item2.Key == "::{645FF040-5081-101B-9F08-00AA002F954E}";
+		bool flag2 = !item2.IsVirtual && Directory.Exists(item2.Path);
+		if (!flag && !flag2)
+		{
+			return null;
+		}
+		string[] array = (draggedKeys ?? files ?? Array.Empty<string>()).Where((string k) => !k.StartsWith("::")).ToArray();
+		if (array.Length == 0)
+		{
+			return null;
+		}
+		if (flag2 && array.Any((string s) => string.Equals(s.TrimEnd('\\'), item2.Path, StringComparison.OrdinalIgnoreCase) || item2.Path.StartsWith(s.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)))
+		{
+			return null;
+		}
+		double left = Canvas.GetLeft(item);
+		double top = Canvas.GetTop(item);
+		if (pos.X < left + 14.0 || pos.X > left + item.Width - 14.0 || pos.Y < top + 4.0 || pos.Y > top + item.Height - 14.0)
+		{
+			return null;
+		}
+		return (item, item2);
+	}
+
+	private void SetDropHover(Border? tile)
+	{
+		if (tile != hoverTile)
+		{
+			if (hoverTile != null)
+			{
+				hoverTile.Background = hoverOldBg;
+				hoverTile.BorderBrush = hoverOldBorder;
+			}
+			hoverTile = tile;
+			if (tile != null)
+			{
+				hoverOldBg = tile.Background;
+				hoverOldBorder = tile.BorderBrush;
+				tile.Background = Theme.Brush(Theme.Accent, 85);
+				tile.BorderBrush = Theme.Brush(Theme.Accent);
+			}
+		}
+	}
+
+	private void OnDrop(object sender, DragEventArgs e)
+	{
+		Point position = e.GetPosition(canvas);
+		int index = IndexAt(position);
+		string[] array = Tiles.KeysFrom(e.Data);
+		string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+		(Border, DesktopItem)? tuple = DropTargetAt(position, array, files);
+		SetDropHover(null);
+		App app = App.Instance;
+		PanelConfig destination = Placement;
+		if (tuple.HasValue)
+		{
+			(Border, DesktopItem) valueOrDefault = tuple.GetValueOrDefault();
+			DesktopItem folder = valueOrDefault.Item2;
+			string[] srcs = (array ?? files).Where((string k) => !k.StartsWith("::")).ToArray();
+			bool bin = folder.Key == "::{645FF040-5081-101B-9F08-00AA002F954E}";
+			bool copy = !bin && WantsCopy(e, srcs, folder.Path);
+			Dispatcher.InvokeAsync(() =>
+			{
+				if (bin)
+				{
+					app.RecycleFiles(srcs);
+				}
+				else
+				{
+					app.TransferFiles(srcs, folder.Path, copy);
+				}
+			});
+			e.Effects = ((array != null) ? DragDropEffects.Move : (DragDropEffects.Copy & e.AllowedEffects));
+		}
+		else if (array != null)
+		{
+			app.MoveManyToPanel(array, destination, index);
+			e.Effects = DragDropEffects.Move;
+		}
+		else if (files != null && files.Length > 0)
+		{
+			bool copy2 = WantsCopy(e, files, App.DesktopDir);
+			Dispatcher.InvokeAsync(() =>
+			{
+				app.BringFilesToDesktop(files, copy2, destination, index);
+			});
+			e.Effects = DragDropEffects.Copy & e.AllowedEffects;
+		}
+		e.Handled = true;
+	}
+
+	public void RevealArrivals(List<(string key, bool fly)> items, Point from)
+	{
+		if (closed)
+		{
+			return;
+		}
+		bool flag = shown;
+		peekUntil = DateTime.UtcNow.AddMilliseconds(3200.0);
+		if (!shown)
+		{
+			ShowPanel();
+		}
+		if (!shown)
+		{
+			return;
+		}
+		int num = 0;
+		foreach (var item2 in items)
+		{
+			string key = item2.key;
+			bool item = item2.fly;
+			Border border = TileOf(key);
+			if (border == null)
+			{
+				continue;
+			}
+			if (item && num < 12)
+			{
+				double delayMs = num++ * 90;
+				flying[key] = ((!flying.TryGetValue(key, out var value)) ? 1 : (value + 1));
+				border.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.0, 1.0));
+				FlyOverlay.Fly(to: new Point(Left + Canvas.GetLeft(border) + border.Width / 2.0, Top + Canvas.GetTop(border) + border.Height / 2.0), item: (DesktopItem)border.Tag, from: from, delayMs: delayMs, onArrive: () =>
+				{
+					if (!closed)
+					{
+						if (flying.TryGetValue(key, out var value2) && --value2 > 0)
+						{
+							flying[key] = value2;
+						}
+						else
+						{
+							flying.Remove(key);
+						}
+						Border border2 = TileOf(key);
+						if (border2 != null)
+						{
+							if (!flying.ContainsKey(key))
+							{
+								border2.BeginAnimation(UIElement.OpacityProperty, Anim.To(1.0, 80.0));
+							}
+							Highlight(key);
+							peekUntil = DateTime.UtcNow.AddMilliseconds(1800.0);
+						}
+					}
+				});
+			}
+			else
+			{
+				Anim.After(flag ? 60 : 700, () =>
+				{
+					Highlight(key);
+				});
+			}
+		}
+	}
+
+	private void Highlight(string key)
+	{
+		if (!closed)
+		{
+			highlights[key] = DateTime.UtcNow.AddMilliseconds(2200.0);
+			QueueHighlightRedraw();
+		}
+	}
+
+	private void QueueHighlightRedraw()
+	{
+		if (!closed && !highlightRedrawQueued)
+		{
+			highlightRedrawQueued = true;
+			Dispatcher.InvokeAsync(() =>
+			{
+				highlightRedrawQueued = false;
+				RedrawHighlights();
+			}, DispatcherPriority.Render);
+		}
+	}
+
+	private void RedrawHighlights()
+	{
+		if (closed)
+		{
+			return;
+		}
+		foreach (UIElement highlightRing in highlightRings)
+		{
+			canvas.Children.Remove(highlightRing);
+		}
+		highlightRings.Clear();
+		DateTime now = DateTime.UtcNow;
+		foreach (var (key, dateTime2) in highlights.ToList())
+		{
+			double totalMilliseconds = (dateTime2 - now).TotalMilliseconds;
+			Border border = TileOf(key);
+			if (totalMilliseconds <= 50.0 || border == null)
+			{
+				highlights.Remove(key);
+				if (border?.Effect is DropShadowEffect)
+				{
+					border.Effect = null;
+				}
+				continue;
+			}
+			Color accent = Theme.Accent;
+			ScaleTransform scaleTransform = new ScaleTransform(1.0, 1.0);
+			Border border2 = new Border
+			{
+				Width = border.Width + 10.0,
+				Height = border.Height + 10.0,
+				CornerRadius = new CornerRadius(16.0),
+				BorderThickness = new Thickness(3.0),
+				BorderBrush = new SolidColorBrush(accent),
+				IsHitTestVisible = false,
+				RenderTransformOrigin = new Point(0.5, 0.5),
+				RenderTransform = scaleTransform
+			};
+			Canvas.SetLeft(border2, Canvas.GetLeft(border) - 5.0);
+			Canvas.SetTop(border2, Canvas.GetTop(border) - 5.0);
+			canvas.Children.Add(border2);
+			highlightRings.Add(border2);
+			DoubleAnimation animation = new DoubleAnimation(1.0, 1.22, TimeSpan.FromMilliseconds(700L))
+			{
+				RepeatBehavior = new RepeatBehavior(TimeSpan.FromMilliseconds(totalMilliseconds)),
+				EasingFunction = new QuadraticEase
+				{
+					EasingMode = EasingMode.EaseOut
+				}
+			};
+			scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, animation);
+			scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
+			border2.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1.0, 0.0, TimeSpan.FromMilliseconds(700L))
+			{
+				RepeatBehavior = new RepeatBehavior(TimeSpan.FromMilliseconds(totalMilliseconds))
+			});
+			border.Effect = new DropShadowEffect
+			{
+				Color = accent,
+				ShadowDepth = 0.0,
+				BlurRadius = 24.0,
+				Opacity = 1.0
+			};
+		}
+		if (highlights.Count > 0 && !redrawScheduled)
+		{
+			redrawScheduled = true;
+			Anim.After(highlights.Values.Min((DateTime u) => (u - now).TotalMilliseconds) + 30.0, () =>
+			{
+				redrawScheduled = false;
+				QueueHighlightRedraw();
+			});
+		}
+	}
+
+	private List<string> TargetsFor(DesktopItem item)
+	{
+		if (!Sel.Contains(this, item.Key) || Sel.Keys.Count <= 1)
+		{
+			return new List<string> { item.Key };
+		}
+		return Sel.Ordered(this);
+	}
+
+	private ContextMenu BackgroundMenu(int index)
+	{
+		App app = App.Instance;
+		PanelConfig destination = Placement;
+		ContextMenu contextMenu = new ContextMenu
+		{
+			Items = { (object)Tiles.Item("새 폴더", () =>
+			{
+				app.CreateNewFolder(destination, index);
+			}) }
+		};
+		MenuItem menuItem = Tiles.Item("붙여넣기", () =>
+		{
+			app.PasteToDesktop(destination, index);
+		});
+		menuItem.IsEnabled = App.ClipboardHasFiles();
+		contextMenu.Items.Add(menuItem);
+		contextMenu.Items.Add(new Separator());
+		contextMenu.Items.Add(Tiles.Item("바탕화면 폴더 열기", app.OpenDesktopFolder));
+		return contextMenu;
+	}
+
+	private List<MenuEntry> BuildExtras(DesktopItem item)
+	{
+		App app = App.Instance;
+		List<string> targets = TargetsFor(item);
+		string count = ((targets.Count > 1) ? $" ({targets.Count}개)" : "");
+		List<MenuEntry> list = app.Config.Bags.Select((BagConfig b) => MenuEntry.Item(b.Name, () =>
+		{
+			app.MoveManyToBag(targets, b);
+		})).ToList();
+		if (list.Count > 0)
+		{
+			list.Add(MenuEntry.Separator);
+		}
+		list.Add(MenuEntry.Item("새 가방 만들어서 넣기...", () =>
+		{
+			app.CreateBag(targets);
+		}));
+		List<MenuEntry> children = (from p in app.EdgePanels.Where((EdgePanel p) => p != this).OrderBy((EdgePanel p) => app.PanelLabel(p), StringComparer.CurrentCulture)
+			select MenuEntry.Item(app.PanelLabel(p) + count, () =>
+			{
+				app.MoveManyToPanel(targets, p.Placement, null);
+			})).ToList();
+		return new List<MenuEntry>
+		{
+			MenuEntry.Sub("가방에 넣기" + count, list),
+			MenuEntry.Sub("다른 패널로 옮기기" + count, children)
+		};
+	}
 }

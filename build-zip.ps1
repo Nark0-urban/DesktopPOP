@@ -16,7 +16,7 @@ dotnet publish "$root\DesktopPop.csproj" -c Release -r win-x64 --self-contained 
 if ($LASTEXITCODE -ne 0) { throw "빌드 실패" }
 
 New-Item -ItemType Directory -Force $dist | Out-Null
-Copy-Item "$root\사용법.txt" $out
+Copy-Item "$root\사용법.txt", "$root\먼저 읽어주세요.txt" $out
 $zip = Join-Path $dist "DesktopPop-$Version-win-x64.zip"
 Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
 "만들어짐: $zip"

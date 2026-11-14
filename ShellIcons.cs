@@ -1,82 +1,173 @@
 using System;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace DesktopPop;
 
-[ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IShellItem
-{
-    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-    void GetParent(out IShellItem ppsi);
-    void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
-    void GetAttributes(uint mask, out uint attribs);
-    void Compare(IShellItem psi, uint hint, out int order);
-}
-
-[ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IShellItemImageFactory
-{
-    [PreserveSig] int GetImage(Native.SIZE size, int flags, out IntPtr phbm);
-}
-
-/// <summary>윈도우 탐색기와 같은 이름·아이콘(썸네일)을 가져옴.</summary>
 internal static class ShellIcons
 {
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
-    static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, [In] ref Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+	private static readonly Lazy<BlockingCollection<Action>> backgroundWork = new Lazy<BlockingCollection<Action>>(() =>
+	{
+		BlockingCollection<Action> queue = new BlockingCollection<Action>();
+		Thread thread = new Thread(() =>
+		{
+			foreach (Action item in queue.GetConsumingEnumerable())
+			{
+				try
+				{
+					item();
+				}
+				catch (Exception ex)
+				{
+					App.Log(ex);
+				}
+			}
+		});
+		thread.IsBackground = true;
+		thread.Name = "DesktopPop icon refresh";
+		thread.SetApartmentState(ApartmentState.STA);
+		thread.Start();
+		return queue;
+	});
 
-    public static (string? name, BitmapSource? icon) Load(string parsingName, int px)
-    {
-        IShellItem? item = null;
-        try
-        {
-            var iid = typeof(IShellItem).GUID;
-            SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref iid, out item);
-            string? name = null;
-            try { item.GetDisplayName(0 /*SIGDN_NORMALDISPLAY*/, out name); } catch { }
+	private static readonly Lazy<ImageSource> folderPlaceholder = new Lazy<ImageSource>(() => MakePlaceholder(folder: true));
 
-            BitmapSource? icon = null;
-            if (item is IShellItemImageFactory f &&
-                f.GetImage(new Native.SIZE { cx = px, cy = px }, 0, out var hbmp) == 0 && hbmp != IntPtr.Zero)
-            {
-                try { icon = FromHBitmap(hbmp); }
-                finally { Native.DeleteObject(hbmp); }
-            }
-            return (name, icon);
-        }
-        catch
-        {
-            return (null, null);
-        }
-        finally
-        {
-            if (item != null) Marshal.ReleaseComObject(item);
-        }
-    }
+	private static readonly Lazy<ImageSource> filePlaceholder = new Lazy<ImageSource>(() => MakePlaceholder(folder: false));
 
-    static BitmapSource? FromHBitmap(IntPtr hbmp)
-    {
-        Native.GetObject(hbmp, Marshal.SizeOf<Native.BITMAP>(), out var bm);
-        int w = bm.bmWidth, h = Math.Abs(bm.bmHeight);
-        if (w <= 0 || h <= 0) return null;
-        var bi = new Native.BITMAPINFO { biSize = 40, biWidth = w, biHeight = -h, biPlanes = 1, biBitCount = 32 };
-        var bits = new byte[w * h * 4];
-        var dc = Native.GetDC(IntPtr.Zero);
-        try
-        {
-            if (Native.GetDIBits(dc, hbmp, 0, (uint)h, bits, ref bi, 0) == 0) return null;
-        }
-        finally { Native.ReleaseDC(IntPtr.Zero, dc); }
+	internal static void QueueWork(Action action)
+	{
+		backgroundWork.Value.Add(action);
+	}
 
-        bool hasAlpha = false;
-        for (int i = 3; i < bits.Length; i += 4) if (bits[i] != 0) { hasAlpha = true; break; }
-        if (!hasAlpha) for (int i = 3; i < bits.Length; i += 4) bits[i] = 255;
+	internal static ImageSource Placeholder(bool folder)
+	{
+		if (!folder)
+		{
+			return filePlaceholder.Value;
+		}
+		return folderPlaceholder.Value;
+	}
 
-        var src = BitmapSource.Create(w, h, 96, 96, hasAlpha ? PixelFormats.Pbgra32 : PixelFormats.Bgra32, null, bits, w * 4);
-        src.Freeze();
-        return src;
-    }
+	private static ImageSource MakePlaceholder(bool folder)
+	{
+		DrawingGroup drawingGroup = new DrawingGroup();
+		SolidColorBrush brush = new SolidColorBrush(folder ? Color.FromRgb(223, 175, 66) : Color.FromRgb(164, 186, 207));
+		Pen pen = new Pen(new SolidColorBrush(Color.FromRgb(73, 88, 106)), 2.0);
+		if (folder)
+		{
+			drawingGroup.Children.Add(new GeometryDrawing(brush, pen, new RectangleGeometry(new Rect(5.0, 9.0, 22.0, 12.0), 3.0, 3.0)));
+			drawingGroup.Children.Add(new GeometryDrawing(brush, pen, new RectangleGeometry(new Rect(5.0, 17.0, 54.0, 38.0), 4.0, 4.0)));
+		}
+		else
+		{
+			drawingGroup.Children.Add(new GeometryDrawing(brush, pen, new RectangleGeometry(new Rect(13.0, 5.0, 38.0, 54.0), 3.0, 3.0)));
+		}
+		DrawingImage drawingImage = new DrawingImage(drawingGroup);
+		drawingImage.Freeze();
+		return drawingImage;
+	}
+
+	[DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+	private static extern void SHCreateItemFromParsingName(string path, nint pbc, [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+	public static (string? name, BitmapSource? icon) Load(string parsingName, int px)
+	{
+		IShellItem item = null;
+		try
+		{
+			Guid riid = typeof(IShellItem).GUID;
+			SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref riid, out item);
+			string ppszName = null;
+			try
+			{
+				item.GetDisplayName(0u, out ppszName);
+			}
+			catch
+			{
+			}
+			BitmapSource item2 = null;
+			if (item is IShellItemImageFactory shellItemImageFactory && shellItemImageFactory.GetImage(new Native.SIZE
+			{
+				cx = px,
+				cy = px
+			}, 0, out var phbm) == 0 && phbm != IntPtr.Zero)
+			{
+				try
+				{
+					item2 = FromHBitmap(phbm);
+				}
+				finally
+				{
+					Native.DeleteObject(phbm);
+				}
+			}
+			return (name: ppszName, icon: item2);
+		}
+		catch
+		{
+			return (name: null, icon: null);
+		}
+		finally
+		{
+			if (item != null)
+			{
+				Marshal.ReleaseComObject(item);
+			}
+		}
+	}
+
+	private static BitmapSource? FromHBitmap(nint hbmp)
+	{
+		Native.GetObject(hbmp, Marshal.SizeOf<Native.BITMAP>(), out var bm);
+		int bmWidth = bm.bmWidth;
+		int num = Math.Abs(bm.bmHeight);
+		if (bmWidth <= 0 || num <= 0)
+		{
+			return null;
+		}
+		Native.BITMAPINFO bi = new Native.BITMAPINFO
+		{
+			biSize = 40,
+			biWidth = bmWidth,
+			biHeight = -num,
+			biPlanes = 1,
+			biBitCount = 32
+		};
+		byte[] array = new byte[bmWidth * num * 4];
+		nint dC = Native.GetDC(IntPtr.Zero);
+		try
+		{
+			if (Native.GetDIBits(dC, hbmp, 0u, (uint)num, array, ref bi, 0u) == 0)
+			{
+				return null;
+			}
+		}
+		finally
+		{
+			Native.ReleaseDC(IntPtr.Zero, dC);
+		}
+		bool flag = false;
+		for (int i = 3; i < array.Length; i += 4)
+		{
+			if (array[i] != 0)
+			{
+				flag = true;
+				break;
+			}
+		}
+		if (!flag)
+		{
+			for (int j = 3; j < array.Length; j += 4)
+			{
+				array[j] = byte.MaxValue;
+			}
+		}
+		BitmapSource bitmapSource = BitmapSource.Create(bmWidth, num, 96.0, 96.0, flag ? PixelFormats.Pbgra32 : PixelFormats.Bgra32, null, array, bmWidth * 4);
+		bitmapSource.Freeze();
+		return bitmapSource;
+	}
 }

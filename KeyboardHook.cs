@@ -1,92 +1,347 @@
 using System;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 
 namespace DesktopPop;
 
-/// <summary>
-/// 선택된 아이콘에 원래 바탕화면 같은 단축키.
-/// Delete = 휴지통, Shift+Delete = 완전 삭제, F2 = 이름 바꾸기, Enter = 열기,
-/// Ctrl+A = 전체 선택, Ctrl+C / Ctrl+X = 복사 / 잘라내기, Esc = 선택 풀기.
-/// 선택된 게 있고, 바탕화면이나 DesktopPop 창이 앞에 있을 때만 키를 가져감
-/// (다른 프로그램에서 타자 칠 때는 절대 안 건드림).
-/// </summary>
 internal static class KeyboardHook
 {
-    delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc fn, IntPtr hMod, uint threadId);
-    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
-    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string? name);
+	private delegate nint LowLevelKeyboardProc(int nCode, nint wParam, nint lParam);
 
-    static IntPtr hook;
-    static LowLevelKeyboardProc? proc; // 가비지 수집되지 않게 붙잡아 둠
-    static Dispatcher? dispatcher;
+	private struct GuiThreadInfo
+	{
+		public int cbSize;
 
-    public static void Install()
-    {
-        if (hook != IntPtr.Zero) return;
-        dispatcher = Dispatcher.CurrentDispatcher;
-        proc = HookProc;
-        hook = SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, proc, GetModuleHandle(null), 0);
-        if (hook == IntPtr.Zero) App.Log($"키보드 감시 설치 실패 ({Marshal.GetLastWin32Error()})");
-    }
+		public uint flags;
 
-    public static void Uninstall()
-    {
-        if (hook != IntPtr.Zero) UnhookWindowsHookEx(hook);
-        hook = IntPtr.Zero;
-    }
+		public nint hwndActive;
 
-    static bool Down(int vk) => (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
+		public nint hwndFocus;
 
-    /// <summary>지금 키를 가져가도 되는지: 바탕화면 또는 DesktopPop 창이 맨 앞.</summary>
-    static bool OurTurn()
-    {
-        if (Native.IsDesktopForeground()) return true;
-        Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out uint pid);
-        return pid == (uint)Environment.ProcessId;
-    }
+		public nint hwndCapture;
 
-    static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        try
-        {
-            int msg = wParam.ToInt32();
-            if (nCode >= 0 && (msg == 0x100 || msg == 0x104) && Sel.Host is { } host && Sel.Keys.Count > 0 && OurTurn())
-            {
-                int vk = Marshal.ReadInt32(lParam); // KBDLLHOOKSTRUCT 맨 앞이 키 코드
-                bool ctrl = Down(0x11), shift = Down(0x10), alt = Down(0x12);
-                Action? act = null;
-                if (!ctrl && !alt)
-                {
-                    switch (vk)
-                    {
-                        case 0x2E: act = shift ? () => App.Instance.DeleteSelected(host, permanent: true)
-                                               : () => App.Instance.DeleteSelected(host, permanent: false); break; // Delete
-                        case 0x71: if (!shift) act = () => App.Instance.RenameSelected(host); break;                // F2
-                        case 0x0D: if (!shift) act = () => App.Instance.OpenSelected(host); break;                  // Enter
-                        case 0x1B: act = () => Sel.Clear(); break;                                                  // Esc
-                    }
-                }
-                else if (ctrl && !alt && !shift)
-                {
-                    switch (vk)
-                    {
-                        case 0x41: act = () => Sel.Set(host, host.OrderedKeys); break;                // Ctrl+A
-                        case 0x43: act = () => App.Instance.CopySelected(host, cut: false); break;     // Ctrl+C
-                        case 0x58: act = () => App.Instance.CopySelected(host, cut: true); break;      // Ctrl+X
-                    }
-                }
-                if (act != null)
-                {
-                    dispatcher?.InvokeAsync(act, DispatcherPriority.Input);
-                    return new IntPtr(1); // 이 키는 우리가 처리 (숨겨진 원래 바탕화면이 엉뚱한 걸 지우지 않게)
-                }
-            }
-        }
-        catch { }
-        return CallNextHookEx(hook, nCode, wParam, lParam);
-    }
+		public nint hwndMenuOwner;
+
+		public nint hwndMoveSize;
+
+		public nint hwndCaret;
+
+		public int left;
+
+		public int top;
+
+		public int right;
+
+		public int bottom;
+	}
+
+	private sealed class Suspension : IDisposable
+	{
+		private bool disposed;
+
+		public Suspension()
+		{
+			suspended++;
+		}
+
+		public void Dispose()
+		{
+			if (!disposed)
+			{
+				disposed = true;
+				suspended--;
+			}
+		}
+	}
+
+	private static nint hook;
+
+	private static LowLevelKeyboardProc? proc;
+
+	private static Dispatcher? dispatcher;
+
+	private static int suspended;
+
+	internal static bool IsSuspended => suspended > 0;
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern nint SetWindowsHookEx(int idHook, LowLevelKeyboardProc fn, nint hMod, uint threadId);
+
+	[DllImport("user32.dll")]
+	private static extern bool UnhookWindowsHookEx(nint hhk);
+
+	[DllImport("user32.dll")]
+	private static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+	private static extern nint GetModuleHandle(string? name);
+
+	[DllImport("user32.dll")]
+	private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+	private static extern int GetClassName(nint hwnd, StringBuilder name, int count);
+
+	public static IDisposable Suspend()
+	{
+		return new Suspension();
+	}
+
+	public static void Install()
+	{
+		if (hook == IntPtr.Zero)
+		{
+			dispatcher = Dispatcher.CurrentDispatcher;
+			proc = HookProc;
+			hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0u);
+			if (hook == IntPtr.Zero)
+			{
+				App.Log($"키보드 감시 설치 실패 ({Marshal.GetLastWin32Error()})");
+			}
+		}
+	}
+
+	public static void Uninstall()
+	{
+		if (hook != IntPtr.Zero)
+		{
+			UnhookWindowsHookEx(hook);
+		}
+		hook = IntPtr.Zero;
+	}
+
+	private static bool Down(int vk)
+	{
+		return (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
+	}
+
+	private static bool OurTurn(ISelHost host)
+	{
+		if (suspended > 0 || App.OpenMenus > 0 || App.DragSource != null || !host.BandSelectable || !(host is Window { IsVisible: not false, IsEnabled: not false } window))
+		{
+			return false;
+		}
+		nint foregroundWindow = Native.GetForegroundWindow();
+		nint handle = new WindowInteropHelper(window).Handle;
+		if (handle == IntPtr.Zero || (foregroundWindow != handle && !Native.IsDesktopForeground()))
+		{
+			return false;
+		}
+		GuiThreadInfo info = new GuiThreadInfo
+		{
+			cbSize = Marshal.SizeOf<GuiThreadInfo>()
+		};
+		if (!GetGUIThreadInfo(0u, ref info))
+		{
+			return false;
+		}
+		if ((info.flags & 0x1C) != 0 || info.hwndMenuOwner != IntPtr.Zero)
+		{
+			return false;
+		}
+		StringBuilder stringBuilder = new StringBuilder(128);
+		GetClassName(info.hwndFocus, stringBuilder, stringBuilder.Capacity);
+		string text = stringBuilder.ToString();
+		if (text.Equals("Edit", StringComparison.OrdinalIgnoreCase) || text.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+		bool flag = foregroundWindow == handle;
+		if (flag)
+		{
+			IInputElement focusedElement = Keyboard.FocusedElement;
+			bool flag2 = ((focusedElement is TextBoxBase || focusedElement is PasswordBox) ? true : false);
+			flag = flag2 || (Keyboard.FocusedElement is ComboBox comboBox && comboBox.IsEditable);
+		}
+		if (flag)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	private static nint HookProc(int nCode, nint wParam, nint lParam)
+	{
+		try
+		{
+			int num = ((IntPtr)wParam).ToInt32();
+			int num2;
+			int num3;
+			if (nCode >= 0)
+			{
+				if (num != 256)
+				{
+					num2 = ((num == 260) ? 1 : 0);
+					if (num2 == 0)
+					{
+						goto IL_002b;
+					}
+				}
+				else
+				{
+					num2 = 1;
+				}
+				num3 = Marshal.ReadInt32(lParam);
+				goto IL_0034;
+			}
+			num2 = 0;
+			goto IL_002b;
+			IL_002b:
+			num3 = 0;
+			goto IL_0034;
+			IL_0034:
+			int num4 = num3;
+			if (num2 != 0)
+			{
+				App.Instance.ObserveGlobalKeyboardInput(num4);
+			}
+			bool flag = (byte)num2 != 0;
+			if (flag)
+			{
+				bool flag2;
+				switch (num4)
+				{
+				case 13:
+				case 27:
+				case 46:
+				case 65:
+				case 67:
+				case 88:
+				case 113:
+					flag2 = true;
+					break;
+				default:
+					flag2 = false;
+					break;
+				}
+				flag = flag2;
+			}
+			if (flag)
+			{
+				ISelHost host = Sel.Host;
+				if (host != null && Sel.Keys.Count > 0)
+				{
+					bool flag3 = Down(17);
+					bool flag4 = Down(16);
+					bool flag5 = Down(18);
+					flag = !flag5;
+					if (flag)
+					{
+						bool flag2;
+						if (flag3)
+						{
+							bool flag6 = !flag4;
+							if (flag6)
+							{
+								bool flag7 = ((num4 == 65 || num4 == 67 || num4 == 88) ? true : false);
+								flag6 = flag7;
+							}
+							flag2 = flag6;
+						}
+						else
+						{
+							bool flag6 = ((num4 == 13 || num4 == 27 || num4 == 46) ? true : false);
+							flag2 = flag6 || (num4 == 113 && !flag4);
+						}
+						flag = flag2;
+					}
+					if (!flag || !OurTurn(host))
+					{
+						return CallNextHookEx(hook, nCode, wParam, lParam);
+					}
+					Action act = null;
+					if (!flag3 && !flag5)
+					{
+						switch (num4)
+						{
+						case 46:
+							act = (flag4 ? ((Action)(() =>
+							{
+								App.Instance.DeleteSelected(host, permanent: true);
+							})) : ((Action)(() =>
+							{
+								App.Instance.DeleteSelected(host, permanent: false);
+							})));
+							break;
+						case 113:
+							if (!flag4)
+							{
+								act = () =>
+								{
+									App.Instance.RenameSelected(host);
+								};
+							}
+							break;
+						case 13:
+							if (!flag4)
+							{
+								act = () =>
+								{
+									App.Instance.OpenSelected(host);
+								};
+							}
+							break;
+						case 27:
+							act = () =>
+							{
+								Sel.Clear();
+							};
+							break;
+						}
+					}
+					else if (flag3 && !flag5 && !flag4)
+					{
+						switch (num4)
+						{
+						case 65:
+							act = () =>
+							{
+								Sel.Set(host, host.OrderedKeys);
+							};
+							break;
+						case 67:
+							act = () =>
+							{
+								App.Instance.CopySelected(host, cut: false);
+							};
+							break;
+						case 88:
+							act = () =>
+							{
+								App.Instance.CopySelected(host, cut: true);
+							};
+							break;
+						}
+					}
+					if (act != null)
+					{
+						string[] keys = Sel.Keys.ToArray();
+						dispatcher?.InvokeAsync(() =>
+						{
+							if (Sel.Host != host || !keys.SequenceEqual(Sel.Keys, StringComparer.OrdinalIgnoreCase) || !OurTurn(host))
+							{
+								return;
+							}
+							using (Suspend())
+							{
+								act();
+							}
+						}, DispatcherPriority.Input);
+						return new IntPtr(1);
+					}
+				}
+			}
+		}
+		catch
+		{
+		}
+		return CallNextHookEx(hook, nCode, wParam, lParam);
+	}
 }

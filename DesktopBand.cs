@@ -4,271 +4,341 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Shapes;
 using System.Windows.Threading;
 
 namespace DesktopPop;
 
-/// <summary>
-/// 화면 어디서든 끌면 나오는 선택 네모 (원래 바탕화면처럼).
-/// 빈 바탕화면, 가장자리 판의 빈 곳, 펼친 가방의 빈 곳 어디서 시작해도 같은 네모.
-/// 네모에 걸린 아이콘(열려 있는 가장자리 판 / 펼친 가방)이 선택됨.
-/// </summary>
 internal static class DesktopBand
 {
-    static BandOverlay? overlay;
+	private readonly record struct Snap(Native.POINT A, Native.POINT B, ISelHost? BaseHost, List<string> BaseKeys);
 
-    // ── 상태: 마우스 감시가 신호가 온 순서 그대로 "바로" 바꿈 (그래서 아무리 빨리 눌러도 순서가 안 꼬임) ──
-    static bool buttonDown;                 // 지금 왼쪽 버튼이 눌려 있는지
-    static bool down, active;
-    static Native.POINT start, cur;
-    static Action? onClick;
-    static ISelHost? baseHost;
-    static List<string> baseKeys = new();
+	private delegate nint LowLevelMouseProc(int nCode, nint wParam, nint lParam);
 
-    // ── 그리기·선택 계산은 무거워서 나중에 한 번에 ──
-    readonly record struct Snap(Native.POINT A, Native.POINT B, ISelHost? BaseHost, List<string> BaseKeys);
-    static Snap? finishSnap;               // 막 끝난 네모 (마지막 선택을 반영해야 함)
-    static bool renderQueued, overlayShown;
+	private static BandOverlay? overlay;
 
-    public static bool IsActive => down;
+	private static bool buttonDown;
 
-    static bool KeyDown(int vk) => (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
-    static bool AddKeys() => KeyDown(0x11) || KeyDown(0x10); // Ctrl 또는 Shift
+	private static bool down;
 
-    /// <summary>가장자리 판 / 펼친 가방의 빈 곳을 눌렀을 때 (창 쪽에서 호출).</summary>
-    public static void Begin(Native.POINT p, bool addToSelection, Action? clickAction)
-    {
-        // 그 사이 이미 버튼을 뗐으면(아주 빠른 클릭) 끌기가 아니라 그냥 클릭
-        bool pressed = hook != IntPtr.Zero ? buttonDown : KeyDown(0x01);
-        if (!pressed) { clickAction?.Invoke(); return; }
-        if (!down) Start(p, addToSelection, clickAction);
-    }
+	private static bool active;
 
-    /// <summary>안전장치용: 버튼을 뗐는데 네모가 남아 있으면 끝냄.</summary>
-    public static void End()
-    {
-        buttonDown = false;
-        if (down) OnUp();
-    }
+	private static Native.POINT start;
 
-    static void Start(Native.POINT p, bool add, Action? clickAction)
-    {
-        down = true;
-        active = false;
-        start = cur = p;
-        onClick = clickAction;
-        baseHost = add ? Sel.Host : null;
-        baseKeys = baseHost != null ? Sel.Ordered(baseHost) : new List<string>();
-    }
+	private static Native.POINT cur;
 
-    static void OnMove(Native.POINT p)
-    {
-        if (!down) return;
-        cur = p;
-        if (!active && Math.Abs(p.X - start.X) + Math.Abs(p.Y - start.Y) < 6) return;
-        active = true;
-        QueueRender();
-    }
+	private static Action? onClick;
 
-    static void OnUp()
-    {
-        down = false;
-        if (active)
-        {
-            finishSnap = new Snap(start, cur, baseHost, baseKeys);
-            active = false;
-            QueueRender();
-        }
-        else
-        {
-            var click = onClick; // 끌지 않고 그냥 클릭
-            dispatcher?.InvokeAsync(() => click?.Invoke(), DispatcherPriority.Input);
-        }
-    }
+	private static ISelHost? baseHost;
 
-    static void QueueRender()
-    {
-        if (renderQueued || dispatcher == null) return;
-        renderQueued = true;
-        dispatcher.InvokeAsync(Render, DispatcherPriority.Input);
-    }
+	private static List<string> baseKeys = new List<string>();
 
-    /// <summary>지금 상태대로 네모를 그리고 선택을 반영.</summary>
-    static void Render()
-    {
-        renderQueued = false;
-        try
-        {
-            if (finishSnap is Snap f) { finishSnap = null; ApplySelection(f); }
-            if (down && active)
-            {
-                overlay ??= new BandOverlay();
-                if (!overlayShown) { overlay.ShowBand(); overlayShown = true; }
-                overlay.SetBand(start, cur);
-                ApplySelection(new Snap(start, cur, baseHost, baseKeys));
-            }
-            else if (overlayShown)
-            {
-                overlay?.HideBand();
-                overlayShown = false;
-            }
-        }
-        catch (Exception ex) { App.Log(ex); }
-    }
+	private static Snap? finishSnap;
 
-    /// <summary>네모(물리 픽셀)에 걸린 아이콘 선택 — 가장 많이 걸린 곳 하나만.</summary>
-    static void ApplySelection(Snap s)
-    {
-        var band = new Rect(new Point(s.A.X, s.A.Y), new Point(s.B.X, s.B.Y));
-        ISelHost? best = null;
-        var bestHits = new List<string>();
-        foreach (var host in App.Instance.SelHosts())
-        {
-            if (!host.BandSelectable) continue;
-            var hits = host.OrderedKeys.Where(k => host.TileOf(k) is { } t && ScreenRect(t) is { } r && r.IntersectsWith(band)).ToList();
-            if (hits.Count > bestHits.Count) { best = host; bestHits = hits; }
-        }
-        if (best != null) Sel.Set(best, best == s.BaseHost ? s.BaseKeys.Concat(bestHits) : bestHits);
-        else if (s.BaseHost != null) Sel.Set(s.BaseHost, s.BaseKeys);
-        else Sel.Clear();
-    }
+	private static bool renderQueued;
 
-    static Rect? ScreenRect(FrameworkElement el)
-    {
-        if (!el.IsVisible || PresentationSource.FromVisual(el) == null) return null;
-        try
-        {
-            var a = el.PointToScreen(new Point(0, 0));
-            var b = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
-            return new Rect(a, b);
-        }
-        catch { return null; }
-    }
+	private static bool overlayShown;
 
-    // ---------- 마우스 전역 감시 ----------
+	private static nint hook;
 
-    delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc fn, IntPtr hMod, uint threadId);
-    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
-    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string? name);
+	private static LowLevelMouseProc? proc;
 
-    static IntPtr hook;
-    static LowLevelMouseProc? proc; // 가비지 수집되지 않게 붙잡아 둠
-    static Dispatcher? dispatcher;
+	private static Dispatcher? dispatcher;
 
-    public static void Install()
-    {
-        if (hook != IntPtr.Zero) return;
-        dispatcher = Dispatcher.CurrentDispatcher;
-        proc = HookProc;
-        hook = SetWindowsHookEx(14 /*WH_MOUSE_LL*/, proc, GetModuleHandle(null), 0);
-        if (hook == IntPtr.Zero) App.Log($"마우스 감시 설치 실패 ({Marshal.GetLastWin32Error()})");
-        buttonDown = KeyDown(0x01);
-    }
+	public static bool IsActive => down;
 
-    public static void Uninstall()
-    {
-        if (hook != IntPtr.Zero) UnhookWindowsHookEx(hook);
-        hook = IntPtr.Zero;
-    }
+	private static bool KeyDown(int vk)
+	{
+		return (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
+	}
 
-    static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0)
-        {
-            try
-            {
-                var pt = Marshal.PtrToStructure<Native.POINT>(lParam); // MSLLHOOKSTRUCT 맨 앞이 좌표
-                switch (wParam.ToInt32())
-                {
-                    case 0x201: // 왼쪽 버튼 누름
-                        buttonDown = true;
-                        // 빈 바탕화면에서 시작하는 네모는 가장자리가 열려 있거나 가방이 펼쳐져 있을 때만
-                        if (!down && Native.IsDesktopAt(pt) && App.Instance.SelHosts().Any(h => h.BandSelectable))
-                            Start(pt, AddKeys(), () => Sel.Clear());
-                        break;
-                    case 0x200: // 움직임
-                        if (down) OnMove(pt);
-                        break;
-                    case 0x202: // 왼쪽 버튼 뗌
-                        buttonDown = false;
-                        if (down) OnUp();
-                        break;
-                }
-            }
-            catch { }
-        }
-        return CallNextHookEx(hook, nCode, wParam, lParam);
-    }
-}
+	private static bool AddKeys()
+	{
+		if (!KeyDown(17))
+		{
+			return KeyDown(16);
+		}
+		return true;
+	}
 
-// <summary>선택 네모를 그리는 화면 전체 투명 창 (마우스는 뚫고 지나감).</summary>
-internal sealed class BandOverlay : Window
-{
-    readonly Canvas canvas = new();
-    readonly Rectangle rect;
+	public static void Begin(Native.POINT p, bool addToSelection, Action? clickAction)
+	{
+		if (!((hook != IntPtr.Zero) ? buttonDown : KeyDown(1)))
+		{
+			clickAction?.Invoke();
+		}
+		else if (!down)
+		{
+			Start(p, addToSelection, clickAction);
+		}
+	}
 
-    public BandOverlay()
-    {
-        WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
-        ShowInTaskbar = false;
-        Topmost = true;
-        ShowActivated = false;
-        ResizeMode = ResizeMode.NoResize;
-        IsHitTestVisible = false;
-        Title = "DesktopPop Band";
-        rect = new Rectangle { StrokeThickness = 1, RadiusX = 3, RadiusY = 3, IsHitTestVisible = false };
-        canvas.Children.Add(rect);
-        Content = canvas;
-        SourceInitialized += (s, e) =>
-        {
-            var hwnd = new WindowInteropHelper(this).Handle;
-            Native.MakeToolWindow(hwnd);
-            const int GWL_EXSTYLE = -20;
-            long ex = Native.GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
-            ex |= 0x20 | 0x80000 | 0x08000000; // 마우스가 뚫고 지나감
-            Native.SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex));
-        };
-    }
+	public static void End()
+	{
+		buttonDown = false;
+		if (down)
+		{
+			OnUp();
+		}
+	}
 
-    public void ShowBand()
-    {
-        hideToken++;
-        rect.Fill = Theme.Brush(Theme.Accent, 0x30);
-        rect.Stroke = Theme.Brush(Theme.Accent, 0xCC);
-        rect.Width = rect.Height = 0;
-        rect.Visibility = Visibility.Visible;
-        Left = 0; Top = 0;
-        Width = SystemParameters.PrimaryScreenWidth;
-        Height = SystemParameters.PrimaryScreenHeight;
-        if (!IsVisible) Show();
-        Native.SetTopmost(new WindowInteropHelper(this).Handle);
-    }
+	private static void Start(Native.POINT p, bool add, Action? clickAction)
+	{
+		down = true;
+		active = false;
+		start = (cur = p);
+		onClick = clickAction;
+		baseHost = (add ? Sel.Host : null);
+		baseKeys = ((baseHost != null) ? Sel.Ordered(baseHost) : new List<string>());
+	}
 
-    public void SetBand(Native.POINT a, Native.POINT b)
-    {
-        double s = Native.DipScale();
-        var r = new Rect(new Point(a.X / s, a.Y / s), new Point(b.X / s, b.Y / s));
-        Canvas.SetLeft(rect, r.X);
-        Canvas.SetTop(rect, r.Y);
-        rect.Width = r.Width;
-        rect.Height = r.Height;
-    }
+	private static void OnMove(Native.POINT p)
+	{
+		if (down)
+		{
+			cur = p;
+			if (active || Math.Abs(p.X - start.X) + Math.Abs(p.Y - start.Y) >= 6)
+			{
+				active = true;
+				QueueRender();
+			}
+		}
+	}
 
-    int hideToken;
+	private static void OnUp()
+	{
+		down = false;
+		if (active)
+		{
+			finishSnap = new Snap(start, cur, baseHost, baseKeys);
+			active = false;
+			QueueRender();
+		}
+		else
+		{
+			Action click = onClick;
+			dispatcher?.InvokeAsync(() =>
+			{
+				click?.Invoke();
+			}, DispatcherPriority.Input);
+		}
+	}
 
-    public void HideBand()
-    {
-        rect.Visibility = Visibility.Hidden;
-        rect.Width = rect.Height = 0;
-        int token = ++hideToken;
-        // 빈 화면이 한 번 그려진 다음에 창을 숨김
-        Dispatcher.InvokeAsync(() => { if (token == hideToken) Hide(); }, DispatcherPriority.Background);
-    }
+	private static void QueueRender()
+	{
+		if (!renderQueued && dispatcher != null)
+		{
+			renderQueued = true;
+			dispatcher.InvokeAsync(Render, DispatcherPriority.Input);
+		}
+	}
+
+	private static void Render()
+	{
+		renderQueued = false;
+		try
+		{
+			Snap? snap = finishSnap;
+			if (snap.HasValue)
+			{
+				Snap valueOrDefault = snap.GetValueOrDefault();
+				finishSnap = null;
+				ApplySelection(valueOrDefault);
+			}
+			if (down && active)
+			{
+				if (overlay == null)
+				{
+					overlay = new BandOverlay();
+				}
+				if (!overlayShown)
+				{
+					overlay.ShowBand();
+					overlayShown = true;
+				}
+				overlay.SetBand(start, cur);
+				ApplySelection(new Snap(start, cur, baseHost, baseKeys));
+			}
+			else if (overlayShown)
+			{
+				overlay?.HideBand();
+				overlayShown = false;
+			}
+		}
+		catch (Exception ex)
+		{
+			App.Log(ex);
+		}
+	}
+
+	private static void ApplySelection(Snap s)
+	{
+		Rect band = new Rect(new Point(s.A.X, s.A.Y), new Point(s.B.X, s.B.Y));
+		ISelHost selHost = null;
+		List<string> list = new List<string>();
+		foreach (ISelHost host in App.Instance.SelHosts())
+		{
+			if (!host.BandSelectable)
+			{
+				continue;
+			}
+			List<string> list2 = host.OrderedKeys.Where((string k) =>
+			{
+				Border border = host.TileOf(k);
+				if (border != null)
+				{
+					Rect? rect = ScreenRect(border);
+					if (rect.HasValue)
+					{
+						return rect.GetValueOrDefault().IntersectsWith(band);
+					}
+				}
+				return false;
+			}).ToList();
+			if (list2.Count > list.Count)
+			{
+				selHost = host;
+				list = list2;
+			}
+		}
+		if (selHost != null)
+		{
+			ISelHost h = selHost;
+			IEnumerable<string> ks;
+			if (selHost != s.BaseHost)
+			{
+				IEnumerable<string> enumerable = list;
+				ks = enumerable;
+			}
+			else
+			{
+				ks = s.BaseKeys.Concat(list);
+			}
+			Sel.Set(h, ks);
+		}
+		else if (s.BaseHost != null)
+		{
+			Sel.Set(s.BaseHost, s.BaseKeys);
+		}
+		else
+		{
+			Sel.Clear();
+		}
+	}
+
+	private static Rect? ScreenRect(FrameworkElement el)
+	{
+		if (!el.IsVisible || PresentationSource.FromVisual(el) == null)
+		{
+			return null;
+		}
+		try
+		{
+			Point point = el.PointToScreen(new Point(0.0, 0.0));
+			Point point2 = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
+			return new Rect(point, point2);
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	[DllImport("user32.dll")]
+	private static extern nint SetWindowsHookEx(int idHook, LowLevelMouseProc fn, nint hMod, uint threadId);
+
+	[DllImport("user32.dll")]
+	private static extern bool UnhookWindowsHookEx(nint hhk);
+
+	[DllImport("user32.dll")]
+	private static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+	private static extern nint GetModuleHandle(string? name);
+
+	public static void Install()
+	{
+		if (hook == IntPtr.Zero)
+		{
+			dispatcher = Dispatcher.CurrentDispatcher;
+			proc = HookProc;
+			hook = SetWindowsHookEx(14, proc, GetModuleHandle(null), 0u);
+			if (hook == IntPtr.Zero)
+			{
+				App.Log($"마우스 감시 설치 실패 ({Marshal.GetLastWin32Error()})");
+			}
+			buttonDown = KeyDown(1);
+		}
+	}
+
+	public static void Uninstall()
+	{
+		if (hook != IntPtr.Zero)
+		{
+			UnhookWindowsHookEx(hook);
+		}
+		hook = IntPtr.Zero;
+	}
+
+	private static nint HookProc(int nCode, nint wParam, nint lParam)
+	{
+		if (nCode >= 0)
+		{
+			try
+			{
+				switch (((IntPtr)wParam).ToInt32())
+				{
+				case 513:
+				{
+					Native.POINT pOINT = Marshal.PtrToStructure<Native.POINT>(lParam);
+					App instance = App.Instance;
+					bool flag = instance.ObserveGlobalPointerInput(pOINT);
+					buttonDown = true;
+					if (!flag && !down && instance.SelHosts().Any((ISelHost h) => h.BandSelectable) && Native.IsDesktopAt(pOINT))
+					{
+						Start(pOINT, AddKeys(), () =>
+						{
+							Sel.Clear();
+						});
+					}
+					break;
+				}
+				case 512:
+					if (down)
+					{
+						OnMove(Marshal.PtrToStructure<Native.POINT>(lParam));
+					}
+					break;
+				case 514:
+					buttonDown = false;
+					if (down)
+					{
+						OnUp();
+					}
+					break;
+				case 516:
+				case 519:
+				case 522:
+				case 523:
+				case 526:
+					if (App.Instance.AllPanelsOpen)
+					{
+						App.Instance.ObserveGlobalPointerInput(Marshal.PtrToStructure<Native.POINT>(lParam));
+					}
+					break;
+				case 515:
+				case 517:
+				case 518:
+				case 520:
+				case 521:
+				case 524:
+				case 525:
+					break;
+				}
+			}
+			catch
+			{
+			}
+		}
+		return CallNextHookEx(hook, nCode, wParam, lParam);
+	}
 }
