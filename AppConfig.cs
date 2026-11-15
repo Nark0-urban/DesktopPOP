@@ -39,6 +39,8 @@ internal sealed class AppConfig
 
 	public bool CyberLibrarySeeded { get; set; }
 
+	public bool KafkaLibrarySeeded { get; set; }
+
 	public bool SingleClickLaunch { get; set; }
 
 	public string? AccentColor { get; set; }

@@ -340,6 +340,14 @@ public sealed class App : Application
 				{
 					Log(ex3);
 				}
+				try
+				{
+					BagLibrary.EnsureBundledSeeded(Config);
+				}
+				catch (Exception ex4)
+				{
+					Log(ex4);
+				}
 			});
 		}
 	}

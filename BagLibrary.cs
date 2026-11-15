@@ -81,8 +81,56 @@ internal static class BagLibrary
 		}
 	}
 
+	/// <summary>그림 파일로 프로그램 안에 들어 있는 기본 가방 그림 (보관함 이름, 리소스 이름).</summary>
+	private static readonly (string name, string resource)[] BundledImages = new (string, string)[1] { ("00 카프카", "DesktopPop.Assets.kafka.png") };
+
+	/// <summary>들어 있는 그림 파일을 보관함에 꺼내 둠. 보관함 맨 앞에 보이게 만든 날짜를 앞당김.</summary>
+	private static void WriteBundled(bool overwrite)
+	{
+		Directory.CreateDirectory(Dir);
+		foreach (var (name, resource) in BundledImages)
+		{
+			string path = Path.Combine(Dir, name + ".png");
+			if (!overwrite && File.Exists(path))
+			{
+				continue;
+			}
+			try
+			{
+				using Stream? stream = typeof(BagLibrary).Assembly.GetManifestResourceStream(resource);
+				if (stream == null)
+				{
+					App.Log("기본 그림 리소스를 찾지 못함: " + resource);
+					continue;
+				}
+				using (FileStream file = File.Create(path))
+				{
+					stream.CopyTo(file);
+				}
+				File.SetCreationTimeUtc(path, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+			}
+			catch (Exception ex)
+			{
+				App.Log(ex);
+			}
+		}
+	}
+
+	/// <summary>새로 추가된 기본 그림(카프카)을 이미 쓰던 사람 보관함에도 한 번 넣어 줌. 지운 뒤엔 다시 안 넣음.</summary>
+	public static void EnsureBundledSeeded(AppConfig cfg)
+	{
+		if (cfg.KafkaLibrarySeeded)
+		{
+			return;
+		}
+		WriteBundled(overwrite: false);
+		cfg.KafkaLibrarySeeded = true;
+		cfg.Save();
+	}
+
 	public static void WriteDefaults(bool overwrite = true)
 	{
+		WriteBundled(overwrite);
 		Directory.CreateDirectory(Dir);
 		foreach (var item3 in DefaultIcons.All().Concat(CyberIcons.All()).Concat(SteampunkIcons.All()))
 		{

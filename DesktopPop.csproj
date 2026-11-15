@@ -16,7 +16,12 @@
     <Product>DesktopPop</Product>
     <Company>DesktopPop</Company>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.1.4</Version>
+    <Version>1.1.5</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 기본 가방 그림 (그림 파일로 들어 있는 것들) -->
+    <EmbeddedResource Include="Assets\kafka.png" LogicalName="DesktopPop.Assets.kafka.png" />
+  </ItemGroup>
 
 </Project>
