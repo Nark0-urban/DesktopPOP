@@ -16,7 +16,7 @@
     <Product>DesktopPop</Product>
     <Company>DesktopPop</Company>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.1.5</Version>
+    <Version>1.1.6</Version>
   </PropertyGroup>
 
   <ItemGroup>

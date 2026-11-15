@@ -84,7 +84,27 @@ internal static class BagLibrary
 	/// <summary>그림 파일로 프로그램 안에 들어 있는 기본 가방 그림 (보관함 이름, 리소스 이름).</summary>
 	private static readonly (string name, string resource)[] BundledImages = new (string, string)[1] { ("00 카프카", "DesktopPop.Assets.kafka.png") };
 
-	/// <summary>들어 있는 그림 파일을 보관함에 꺼내 둠. 보관함 맨 앞에 보이게 만든 날짜를 앞당김.</summary>
+	/// <summary>1.1.5 에서 카프카를 맨 앞에 두려고 쓰던 만든 날짜 (이 날짜면 새 자리로 옮김).</summary>
+	private static readonly DateTime OldPinnedFirst = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+	/// <summary>
+	/// 보관함은 만든 날짜 순서로 보여서, 기본 그림(폴더·사이버·스팀펑크) 중 가장 늦은 것보다 1초 뒤로 두면
+	/// 기본 그림들 맨 끝, 사용자가 추가한 그림들 앞에 옴.
+	/// </summary>
+	private static DateTime AfterBuiltIns()
+	{
+		List<DateTime> times = (from i in DefaultIcons.All().Concat(CyberIcons.All()).Concat(SteampunkIcons.All())
+			select Path.Combine(Dir, i.name + ".png") into p
+			where File.Exists(p)
+			select File.GetCreationTimeUtc(p)).ToList();
+		if (times.Count != 0)
+		{
+			return times.Max().AddSeconds(1.0);
+		}
+		return DateTime.UtcNow;
+	}
+
+	/// <summary>들어 있는 그림 파일을 보관함에 꺼내 둠. 기본 그림들 맨 끝에 보이게 함.</summary>
 	private static void WriteBundled(bool overwrite)
 	{
 		Directory.CreateDirectory(Dir);
@@ -107,7 +127,7 @@ internal static class BagLibrary
 				{
 					stream.CopyTo(file);
 				}
-				File.SetCreationTimeUtc(path, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+				File.SetCreationTimeUtc(path, AfterBuiltIns());
 			}
 			catch (Exception ex)
 			{
@@ -119,6 +139,22 @@ internal static class BagLibrary
 	/// <summary>새로 추가된 기본 그림(카프카)을 이미 쓰던 사람 보관함에도 한 번 넣어 줌. 지운 뒤엔 다시 안 넣음.</summary>
 	public static void EnsureBundledSeeded(AppConfig cfg)
 	{
+		// 1.1.5 에서 맨 앞에 넣었던 카프카를 기본 그림들 맨 끝으로 옮김
+		foreach (var (name, _) in BundledImages)
+		{
+			string path = Path.Combine(Dir, name + ".png");
+			try
+			{
+				if (File.Exists(path) && File.GetCreationTimeUtc(path) < OldPinnedFirst)
+				{
+					File.SetCreationTimeUtc(path, AfterBuiltIns());
+				}
+			}
+			catch (Exception ex)
+			{
+				App.Log(ex);
+			}
+		}
 		if (cfg.KafkaLibrarySeeded)
 		{
 			return;
@@ -130,7 +166,12 @@ internal static class BagLibrary
 
 	public static void WriteDefaults(bool overwrite = true)
 	{
-		WriteBundled(overwrite);
+		WriteDrawn(overwrite);
+		WriteBundled(overwrite); // 그려 넣는 기본 그림들 다음 (맨 끝)
+	}
+
+	private static void WriteDrawn(bool overwrite)
+	{
 		Directory.CreateDirectory(Dir);
 		foreach (var item3 in DefaultIcons.All().Concat(CyberIcons.All()).Concat(SteampunkIcons.All()))
 		{
