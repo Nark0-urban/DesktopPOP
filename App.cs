@@ -15,6 +15,7 @@ using Microsoft.Win32;
 
 namespace DesktopPop;
 
+/// <summary>프로그램 본체: 시작·종료, 원래 바탕화면 아이콘 숨기기, 가장자리 판·가방 관리, 파일 옮기기·삭제·이름 바꾸기, 바탕화면 폴더 감시.</summary>
 public sealed class App : Application
 {
 	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -59,8 +60,6 @@ public sealed class App : Application
 
 	private readonly PanelWorkReturn panelWorkReturn = new PanelWorkReturn();
 
-	private PanelButton? panelButton;
-
 	private Tray? tray;
 
 	private DispatcherTimer? edgeTimer;
@@ -102,8 +101,13 @@ public sealed class App : Application
 	[STAThread]
 	public static void Main(string[] args)
 	{
-		if (DesktopRecovery.TryRunHelper(args) || Shell.TryRunHelper(args))
+		if (DesktopRecovery.TryRunHelper(args) || Shell.TryRunHelper(args) || NativeShellMenu.TryRunHelper(args))
 		{
+			return;
+		}
+		if (args.Length > 0 && args[0] == QuitFlag)
+		{
+			Environment.Exit(QuitRunningInstance());
 			return;
 		}
 		bool createdNew;
@@ -125,9 +129,78 @@ public sealed class App : Application
 		}
 	}
 
+	/// <summary>DesktopPop.exe --quit : 켜져 있는 DesktopPop 을 트레이 메뉴의 "종료"와 똑같이 끔 (업데이트 설치용).</summary>
+	private const string QuitFlag = "--quit";
+
+	private const string QuitEventName = "Local\\DesktopPop.Quit.v1";
+
+	private RegisteredWaitHandle? quitWait;
+
+	/// <summary>종료 코드: 0 = 껐음, 1 = 켜져 있지 않음, 2 = 신호는 보냈는데 15초 안에 안 꺼짐.</summary>
+	private static int QuitRunningInstance()
+	{
+		EventWaitHandle signal;
+		try
+		{
+			signal = EventWaitHandle.OpenExisting(QuitEventName);
+		}
+		catch (WaitHandleCannotBeOpenedException)
+		{
+			return 1;
+		}
+		using (signal)
+		{
+			signal.Set();
+		}
+		for (int i = 0; i < 150; i++)
+		{
+			try
+			{
+				using (Mutex.OpenExisting("DesktopPop.SingleInstance.v1"))
+				{
+				}
+			}
+			catch (WaitHandleCannotBeOpenedException)
+			{
+				return 0;
+			}
+			Thread.Sleep(100);
+		}
+		return 2;
+	}
+
+	/// <summary>--quit 신호를 기다림.</summary>
+	private void ListenForQuit()
+	{
+		try
+		{
+			EventWaitHandle signal = new EventWaitHandle(initialState: false, EventResetMode.AutoReset, QuitEventName);
+			quitWait = ThreadPool.RegisterWaitForSingleObject(signal, (object? _, bool _) =>
+			{
+				Dispatcher.InvokeAsync(() =>
+				{
+					Diag("  --quit 신호로 끔 (업데이트 설치)");
+					if (Config is null)
+					{
+						Shutdown(); // 아직 켜는 중이라 아이콘을 숨기기 전
+					}
+					else
+					{
+						Quit();
+					}
+				});
+			}, null, -1, executeOnlyOnce: true);
+		}
+		catch (Exception ex)
+		{
+			Log(ex);
+		}
+	}
+
 	protected override void OnStartup(StartupEventArgs e)
 	{
 		base.OnStartup(e);
+		ListenForQuit();
 		ShutdownMode = ShutdownMode.OnExplicitShutdown;
 		DispatcherUnhandledException += (object s, DispatcherUnhandledExceptionEventArgs ev) =>
 		{
@@ -143,9 +216,10 @@ public sealed class App : Application
 			DesktopRecovery.Restore();
 		};
 		Config = AppConfig.Load();
-		IReadOnlyList<Native.MonitorInfo> readOnlyList = Native.Monitors();
-		Config.EnsurePanelLayout(readOnlyList[0].DeviceName, readOnlyList.Select((Native.MonitorInfo m) => m.DeviceName));
+		IReadOnlyList<Native.MonitorInfo> monitors = Native.Monitors();
+		Config.EnsurePanelLayout(monitors[0].DeviceName, monitors.Select((Native.MonitorInfo m) => m.DeviceName));
 		Theme.Apply(Config.AccentColor, Config.PanelColor);
+		UiFont.Apply(); // data\fonts 에 넣은 폰트가 있으면 (창을 만들기 전에)
 		Diag($"시작: 설정 폴더='{AppConfig.Dir}'{(AppConfig.UsingFallbackDir ? " (exe 폴더에 쓸 수 없어 사용자 폴더 사용)" : "")} 가방={Config.Bags.Count}개");
 		AutoStart.RepairPath();
 		SessionEnding += (object s, SessionEndingCancelEventArgs ev) =>
@@ -315,7 +389,8 @@ public sealed class App : Application
 			DesktopBand.Install();
 			KeyboardHook.Install();
 			SetToggleHotkey(Config.ToggleHotkey, notifyOnFail: true);
-			SetPanelButtonVisible(Config.ShowPanelButton);
+			// 첫 우클릭 때 Windows 메뉴가 바로 뜨게 도우미를 미리 준비 (시작 연출과 겹치지 않게 조금 뒤에)
+			Anim.After(4000.0, NativeShellMenu.Prewarm);
 			if (!Config.LibrarySeeded)
 			{
 				Anim.After(3000.0, () =>
@@ -391,7 +466,6 @@ public sealed class App : Application
 			if (!ShuttingDown && LeftPanel != null)
 			{
 				ReconcilePanels();
-				panelButton?.KeepOnScreen();
 				ScheduleRefresh();
 			}
 		});
@@ -399,46 +473,41 @@ public sealed class App : Application
 
 	private void ReconcilePanels()
 	{
-		IReadOnlyList<Native.MonitorInfo> readOnlyList = Native.Monitors();
-		Config.EnsurePanelLayout(readOnlyList[0].DeviceName, readOnlyList.Select((Native.MonitorInfo m) => m.DeviceName));
+		IReadOnlyList<Native.MonitorInfo> monitors = Native.Monitors();
+		Config.EnsurePanelLayout(monitors[0].DeviceName, monitors.Select((Native.MonitorInfo m) => m.DeviceName));
 		foreach (EdgePanel panel in EdgePanels.ToList())
 		{
-			Native.MonitorInfo monitorInfo = readOnlyList.FirstOrDefault((Native.MonitorInfo m) => m.DeviceName == panel.Monitor.DeviceName);
-			if (monitorInfo == null)
+			Native.MonitorInfo stillConnected = monitors.FirstOrDefault((Native.MonitorInfo m) => m.DeviceName == panel.Monitor.DeviceName);
+			if (stillConnected == null)
 			{
 				panel.DisposePanel();
 				EdgePanels.Remove(panel);
 			}
 			else
 			{
-				panel.UpdateMonitor(monitorInfo);
+				panel.UpdateMonitor(stillConnected);
 			}
 		}
-		foreach (Native.MonitorInfo monitor in readOnlyList)
+		foreach (Native.MonitorInfo monitor in monitors)
 		{
-			Side[] array = new Side[2]
-			{
-				Side.Left,
-				Side.Right
-			};
-			foreach (Side side in array)
+			foreach (Side side in new Side[2] { Side.Left, Side.Right })
 			{
 				if (!EdgePanels.Any((EdgePanel p) => p.Monitor.DeviceName == monitor.DeviceName && p.Side == side))
 				{
-					EdgePanel edgePanel = new EdgePanel(side, monitor);
-					EdgePanels.Add(edgePanel);
+					EdgePanel newPanel = new EdgePanel(side, monitor);
+					EdgePanels.Add(newPanel);
 					if (AllPanelsOpen)
 					{
-						edgePanel.ForceOpen(value: true);
+						newPanel.ForceOpen(value: true);
 					}
 				}
 			}
 		}
 		LeftPanel = EdgePanels.First((EdgePanel p) => p.Side == Side.Left && p.Monitor.IsPrimary);
 		RightPanel = EdgePanels.First((EdgePanel p) => p.Side == Side.Right && p.Monitor.IsPrimary);
-		foreach (EdgePanel edgePanel2 in EdgePanels)
+		foreach (EdgePanel panel in EdgePanels)
 		{
-			edgePanel2.PrepareOpen();
+			panel.PrepareOpen();
 		}
 	}
 
@@ -446,24 +515,16 @@ public sealed class App : Application
 	{
 		Native.GetCursorPos(out var p);
 		Native.MonitorInfo monitor = Native.MonitorAt(p);
-		EdgePanel edgePanel = EdgePanels.FirstOrDefault((EdgePanel edgePanel2) => edgePanel2.Side == side && edgePanel2.Monitor.DeviceName == monitor.DeviceName);
-		if (edgePanel == null)
-		{
-			if (side != Side.Left)
-			{
-				return RightPanel;
-			}
-			edgePanel = LeftPanel;
-		}
-		return edgePanel;
+		EdgePanel? onThisMonitor = EdgePanels.FirstOrDefault((EdgePanel p2) => p2.Side == side && p2.Monitor.DeviceName == monitor.DeviceName);
+		return onThisMonitor ?? ((side == Side.Left) ? LeftPanel : RightPanel);
 	}
 
 	internal string PanelLabel(EdgePanel panel)
 	{
-		int value = (from m in EdgePanels.Select((EdgePanel p) => p.Monitor).DistinctBy((Native.MonitorInfo m) => m.DeviceName, StringComparer.OrdinalIgnoreCase)
+		int monitorNumber = (from m in EdgePanels.Select((EdgePanel p) => p.Monitor).DistinctBy((Native.MonitorInfo m) => m.DeviceName, StringComparer.OrdinalIgnoreCase)
 			orderby m.IsPrimary descending, m.Bounds.Left, m.Bounds.Top
 			select m).ToList().FindIndex((Native.MonitorInfo m) => Eq(m.DeviceName, panel.Monitor.DeviceName)) + 1;
-		return $"모니터 {value}{(panel.Monitor.IsPrimary ? " (주)" : "")} · {((panel.Side == Side.Left) ? "왼쪽" : "오른쪽")}";
+		return $"모니터 {monitorNumber}{(panel.Monitor.IsPrimary ? " (주)" : "")} · {((panel.Side == Side.Left) ? "왼쪽" : "오른쪽")}";
 	}
 
 	internal void ToggleAllPanels()
@@ -504,7 +565,6 @@ public sealed class App : Application
 		{
 			bagWindow.ForceOpen(open);
 		}
-		panelButton?.UpdateState();
 		int version;
 		if (!open)
 		{
@@ -556,40 +616,36 @@ public sealed class App : Application
 		return pid == (uint)Environment.ProcessId;
 	}
 
+	/// <summary>
+	/// 이 화면 위치가 DesktopPop 의 "눌리는 부분"인지 (모두 펼친 상태에서 바깥을 클릭하면 접기 판단용).
+	/// 판·가방 창의 투명한 빈 곳은 바깥으로 침.
+	/// </summary>
 	private bool IsOurPointerSurface(Native.POINT point)
 	{
-		nint num = Native.WindowFromPoint(point);
-		nint num2 = Native.GetAncestor(num, 2u);
-		if (num2 == IntPtr.Zero)
+		nint hit = Native.WindowFromPoint(point);
+		nint topLevel = Native.GetAncestor(hit, 2u); // GA_ROOT
+		if (topLevel == IntPtr.Zero)
 		{
-			num2 = num;
+			topLevel = hit;
 		}
-		if (!IsOurWindow(num2))
+		if (!IsOurWindow(topLevel))
 		{
 			return false;
 		}
-		bool flag;
 		foreach (Window window in Windows)
 		{
-			if (!window.IsVisible || new WindowInteropHelper(window).Handle != num2)
+			if (!window.IsVisible || new WindowInteropHelper(window).Handle != topLevel)
 			{
 				continue;
 			}
-			flag = ((window is EdgePanel || window is BagWindow || window is PanelButton) ? true : false);
-			if (flag)
+			if (window is EdgePanel || window is BagWindow)
 			{
-				IInputElement inputElement = window.InputHitTest(window.PointFromScreen(new Point(point.X, point.Y)));
-				flag = inputElement != null && inputElement != window && (!(window is BagWindow) || inputElement != window.Content);
+				IInputElement element = window.InputHitTest(window.PointFromScreen(new Point(point.X, point.Y)));
+				return element != null && element != window && (!(window is BagWindow) || element != window.Content);
 			}
-			else
-			{
-				flag = true;
-			}
-			goto IL_00ee;
+			return true; // 메뉴·입력 창 같은 다른 DesktopPop 창
 		}
 		return true;
-		IL_00ee:
-		return flag;
 	}
 
 	private void QueueDismissAllPanels()
@@ -633,27 +689,9 @@ public sealed class App : Application
 		{
 			return; // 펼치기 단축키 자체는 "다른 데서 키 누름"으로 치지 않음 (그건 단축키가 직접 접음)
 		}
-		bool flag;
-		switch (virtualKey)
-		{
-		case 16:
-		case 17:
-		case 18:
-		case 91:
-		case 92:
-		case 160:
-		case 161:
-		case 162:
-		case 163:
-		case 164:
-		case 165:
-			flag = true;
-			break;
-		default:
-			flag = false;
-			break;
-		}
-		if (!flag)
+		// Shift·Ctrl·Alt·Win 만 누른 건 무시 (단축키를 누르기 시작한 것일 수 있음)
+		bool modifierOnly = virtualKey is 0x10 or 0x11 or 0x12 or 0x5B or 0x5C or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5;
+		if (!modifierOnly)
 		{
 			nint foregroundWindow = Native.GetForegroundWindow();
 			bool insideOurUi = IsOurWindow(foregroundWindow) || (Native.IsDesktopForeground() && Sel.Host != null && Sel.Keys.Count > 0);
@@ -686,22 +724,12 @@ public sealed class App : Application
 		return ok;
 	}
 
-	internal void SetPanelButtonVisible(bool visible)
+	/// <summary>Windows 우클릭 메뉴 도우미가 계속 튕겨서 간단 메뉴로 바꿨다고 알림.</summary>
+	internal void NotifyWindowsMenuDisabled()
 	{
-		Config.ShowPanelButton = visible;
-		Config.Save();
-		if (visible)
-		{
-			if (panelButton == null)
-			{
-				panelButton = new PanelButton(this);
-			}
-			panelButton.Show();
-		}
-		else
-		{
-			panelButton?.Hide();
-		}
+		Log("Windows 우클릭 메뉴가 계속 실패해서 간단 메뉴로 바꿈");
+		tray?.Balloon("우클릭 메뉴를 간단 메뉴로 바꿨어요", "이 컴퓨터에 설치된 어떤 프로그램의 메뉴 확장 때문에 Windows 메뉴를 띄울 수 없었어요.\n간단 메뉴의 'Windows 메뉴 (압축·보내기 등)...'로 다시 시도할 수 있어요.");
+		tray?.RefreshChecks();
 	}
 
 	internal void OnBagLost(BagWindow w)
@@ -761,21 +789,20 @@ public sealed class App : Application
 					}
 				}
 			}
-			panelButton?.EnsureTopmost();
 		}
 		if (!Native.GetCursorPos(out var p))
 		{
 			return;
 		}
-		bool flag = (Native.GetAsyncKeyState(1) & 0x8000) != 0;
-		if (DesktopBand.IsActive && !flag)
+		bool leftButtonDown = (Native.GetAsyncKeyState(1) & 0x8000) != 0;
+		if (DesktopBand.IsActive && !leftButtonDown)
 		{
-			DesktopBand.End();
+			DesktopBand.End(); // 안전장치: 버튼을 뗐는데 선택 네모가 남아 있으면 끝냄
 		}
 		DateTime utcNow = DateTime.UtcNow;
 		foreach (EdgePanel edgePanel in EdgePanels)
 		{
-			edgePanel.Tick(p, flag, utcNow);
+			edgePanel.Tick(p, leftButtonDown, utcNow);
 		}
 	}
 
@@ -828,10 +855,11 @@ public sealed class App : Application
 					bagWindow.RefreshItems();
 				}
 				Config.Save();
-				List<string> list = Store.DesktopKeyList.Where((string k) => !before.Contains(k)).ToList();
-				if (list.Count > 0 && before.Count > 0)
+				// 바탕화면에 새로 들어온 게 있으면 그쪽 가장자리를 열고 보여 줌
+				List<string> arrived = Store.DesktopKeyList.Where((string k) => !before.Contains(k)).ToList();
+				if (arrived.Count > 0 && before.Count > 0)
 				{
-					RevealArrivals(list, applied);
+					RevealArrivals(arrived, applied);
 				}
 			}
 			catch (Exception ex)
@@ -851,24 +879,25 @@ public sealed class App : Application
 		Config.RemoveItemEverywhere(key);
 	}
 
+	/// <summary>폴더 이름을 바꿨을 때 설정·대기 중인 자리 정보에 들어 있는 그 안쪽 경로들을 새 경로로 고침.</summary>
 	private void RemapPaths(string oldPath, string newPath)
 	{
-		bool flag = FileOperations.RemapConfigPaths(Config, oldPath, newPath);
-		foreach (KeyValuePair<string, (PanelConfig, int?, bool)> item in pendingPlace.ToList())
+		bool changed = FileOperations.RemapConfigPaths(Config, oldPath, newPath);
+		foreach (KeyValuePair<string, (PanelConfig, int?, bool)> pending in pendingPlace.ToList())
 		{
-			string text = FileOperations.RemapPath(item.Key, oldPath, newPath);
-			if (!(text == item.Key))
+			string remapped = FileOperations.RemapPath(pending.Key, oldPath, newPath);
+			if (!(remapped == pending.Key))
 			{
-				pendingPlace.Remove(item.Key);
-				pendingPlace[text] = item.Value;
-				flag = true;
+				pendingPlace.Remove(pending.Key);
+				pendingPlace[remapped] = pending.Value;
+				changed = true;
 			}
 		}
 		if (Sel.Keys.Any((string k) => FileOperations.RemapPath(k, oldPath, newPath) != k))
 		{
 			Sel.Clear();
 		}
-		if (flag)
+		if (changed)
 		{
 			Config.Save();
 		}
@@ -891,80 +920,69 @@ public sealed class App : Application
 		{
 			return;
 		}
-		List<string> source = (from i in Store.VisibleFor(panel)
+		// 놓은 칸 바로 뒤에 있던 (끌고 온 것 말고) 아이콘 앞에 끼워 넣음
+		List<string> visibleKeys = (from i in Store.VisibleFor(panel)
 			select i.Key).ToList();
-		object obj;
-		if (visibleIndex.HasValue)
-		{
-			int valueOrDefault = visibleIndex.GetValueOrDefault();
-			obj = source.Skip(valueOrDefault).FirstOrDefault((string k) => !ks.Contains(k, StringComparer.OrdinalIgnoreCase));
-		}
-		else
-		{
-			obj = null;
-		}
-		string beforeKey = (string)obj;
+		string? beforeKey = visibleIndex is int index
+			? visibleKeys.Skip(index).FirstOrDefault((string k) => !ks.Contains(k, StringComparer.OrdinalIgnoreCase))
+			: null;
 		Config.MoveItemsToPanel(ks, panel, beforeKey);
 		ScheduleRefresh();
 	}
 
+	/// <summary>새로 생긴 파일 하나를 판의 visibleIndex 번째 자리에 넣음 (없으면 맨 끝).</summary>
 	private void PlaceOnPanel(string key, PanelConfig panel, int? visibleIndex)
 	{
-		List<string> list = (from i in Store.VisibleFor(panel)
+		List<string> others = (from i in Store.VisibleFor(panel)
 			select i.Key into k
 			where !Eq(k, key)
 			select k).ToList();
-		object obj;
-		if (visibleIndex.HasValue)
-		{
-			int valueOrDefault = visibleIndex.GetValueOrDefault();
-			if (valueOrDefault >= 0 && valueOrDefault < list.Count)
-			{
-				obj = list[valueOrDefault];
-				goto IL_007c;
-			}
-		}
-		obj = null;
-		goto IL_007c;
-		IL_007c:
-		string beforeKey = (string)obj;
+		string? beforeKey = (visibleIndex is int index && index >= 0 && index < others.Count) ? others[index] : null;
 		Config.MoveItemsToPanel(new string[1] { key }, panel, beforeKey);
 	}
 
+	/// <summary>
+	/// 새로 생길 파일의 자리를 미리 받아 둔 것(pendingPlace) 중 이제 바탕화면에 나타난 것들을 그 자리에 놓음.
+	/// 돌려주는 값: 자리를 잡은 파일 → 마우스 자리에서 날아오는 연출을 할지.
+	/// </summary>
 	private Dictionary<string, bool> ApplyPendingPlacements()
 	{
-		Dictionary<string, bool> dictionary = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-		foreach (KeyValuePair<string, (PanelConfig, int?, bool)> item in pendingPlace.ToList())
+		Dictionary<string, bool> placed = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+		foreach (KeyValuePair<string, (PanelConfig, int?, bool)> pending in pendingPlace.ToList())
 		{
-			if (Store.IsOnDesktop(item.Key))
+			if (Store.IsOnDesktop(pending.Key))
 			{
-				pendingPlace.Remove(item.Key);
-				PlaceOnPanel(item.Key, item.Value.Item1, item.Value.Item2);
-				dictionary[item.Key] = item.Value.Item3;
+				pendingPlace.Remove(pending.Key);
+				PlaceOnPanel(pending.Key, pending.Value.Item1, pending.Value.Item2);
+				placed[pending.Key] = pending.Value.Item3;
 			}
 		}
-		return dictionary;
+		return placed;
 	}
 
+	/// <summary>
+	/// 새로 들어온 아이콘이 있는 판을 열고 보여 줌. 바탕화면에서 만든 것(새 폴더 등)은 마우스 자리에서 날아오게.
+	/// 그 모니터에서 게임·영상 전체화면 중이면 방해하지 않음.
+	/// </summary>
 	private void RevealArrivals(List<string> added, Dictionary<string, bool> applied)
 	{
-		Native.GetCursorPos(out var p);
+		Native.GetCursorPos(out var cursor);
 		bool desktopFg = Native.IsDesktopForeground();
-		double num = Native.DipScale();
-		Point point = new Point((double)p.X / num, (double)p.Y / num);
+		double scale = Native.DipScale();
+		Point from = new Point((double)cursor.X / scale, (double)cursor.Y / scale);
 		foreach (EdgePanel edgePanel in EdgePanels)
 		{
-			if (Native.ShouldBlock(edgePanel.Bounds, blockFullscreen: true, blockMaximized: false))
+			if (Native.IsFullscreenAppOn(edgePanel.Bounds))
 			{
 				continue;
 			}
-			List<string> list = edgePanel.Placement.Items;
-			List<(string, bool)> list2 = (from k in added
-				where list.Any((string x) => Eq(x, k))
-				select (key: k, fly: applied.TryGetValue(k, out var value) ? value : desktopFg)).ToList();
-			if (list2.Count > 0)
+			List<string> panelItems = edgePanel.Placement.Items;
+			List<(string, bool)> mine = (from k in added
+				where panelItems.Any((string x) => Eq(x, k))
+				select (key: k, fly: applied.TryGetValue(k, out var fly) ? fly : desktopFg)).ToList();
+			if (mine.Count > 0)
 			{
-				edgePanel.RevealArrivals(list2, point);
+				edgePanel.RevealArrivals(mine, from);
 			}
 		}
 	}
@@ -979,95 +997,77 @@ public sealed class App : Application
 		TransferFiles(files, DesktopDir, copy, panel, index);
 	}
 
+	/// <summary>
+	/// 파일들을 destDir 폴더로 옮기거나 복사 (탐색기와 같은 진행·확인 창 사용). 바탕화면으로 가져오는 거면
+	/// 판의 index 번째 자리부터 차례로 놓이게 자리를 미리 받아 둠.
+	/// </summary>
 	internal void TransferFiles(string[] files, string destDir, bool copy, PanelConfig? panel = null, int? index = null, bool fly = false)
 	{
 		using (KeyboardHook.Suspend())
 		{
 			destDir = destDir.TrimEnd('\\');
-			bool flag = Eq(destDir, DesktopDir.TrimEnd('\\'));
-			int num = 0;
-			foreach (string text in files)
+			bool toDesktop = Eq(destDir, DesktopDir.TrimEnd('\\'));
+			int placed = 0;
+			foreach (string file in files)
 			{
 				try
 				{
-					string text2 = text.TrimEnd('\\');
-					bool flag2 = Eq(Path.GetDirectoryName(text2) ?? "", destDir);
-					if (flag2 && !copy)
+					string source = file.TrimEnd('\\');
+					bool alreadyThere = Eq(Path.GetDirectoryName(source) ?? "", destDir);
+					if (alreadyThere && !copy)
 					{
-						if (flag && panel != null)
+						// 이미 바탕화면에 있는 파일: 옮길 건 없고 자리만 바꿈
+						if (toDesktop && panel != null)
 						{
-							Dictionary<string, (PanelConfig panel, int? index, bool fly)> dictionary = pendingPlace;
-							int? item;
-							if (index.HasValue)
-							{
-								int valueOrDefault = index.GetValueOrDefault();
-								item = valueOrDefault + num;
-							}
-							else
-							{
-								item = null;
-							}
-							dictionary[text2] = (panel, item, fly);
+							pendingPlace[source] = (panel, index is int i ? i + placed : null, fly);
 						}
-						num++;
+						placed++;
+						continue;
 					}
-					else
+					if (Directory.Exists(source) && (Eq(source, destDir) || destDir.StartsWith(source + "\\", StringComparison.OrdinalIgnoreCase)))
 					{
-						if (Directory.Exists(text2) && (Eq(text2, destDir) || destDir.StartsWith(text2 + "\\", StringComparison.OrdinalIgnoreCase)))
+						continue; // 폴더를 자기 자신이나 자기 안으로는 못 넣음
+					}
+					bool isFolder = Directory.Exists(source);
+					// 같은 폴더에 복사하면 "이름 - 복사본" 처럼 새 이름으로
+					string target = ((copy & alreadyThere) ? FileOperations.UniqueCopyPath(source, destDir, isFolder) : Path.Combine(destDir, Path.GetFileName(source)));
+					if (copy)
+					{
+						if (isFolder)
 						{
-							continue;
-						}
-						bool flag3 = Directory.Exists(text2);
-						string text3 = ((copy & flag2) ? FileOperations.UniqueCopyPath(text2, destDir, flag3) : Path.Combine(destDir, Path.GetFileName(text2)));
-						if (copy)
-						{
-							if (flag3)
-							{
-								FileSystem.CopyDirectory(text2, text3, UIOption.AllDialogs);
-							}
-							else
-							{
-								FileSystem.CopyFile(text2, text3, UIOption.AllDialogs);
-							}
-						}
-						else if (flag3)
-						{
-							FileSystem.MoveDirectory(text2, text3, UIOption.AllDialogs);
+							FileSystem.CopyDirectory(source, target, UIOption.AllDialogs);
 						}
 						else
 						{
-							FileSystem.MoveFile(text2, text3, UIOption.AllDialogs);
+							FileSystem.CopyFile(source, target, UIOption.AllDialogs);
 						}
-						if (!copy)
-						{
-							RemoveEverywhere(text2);
-						}
-						if (flag && panel != null)
-						{
-							Dictionary<string, (PanelConfig panel, int? index, bool fly)> dictionary2 = pendingPlace;
-							int? item2;
-							if (index.HasValue)
-							{
-								int valueOrDefault2 = index.GetValueOrDefault();
-								item2 = valueOrDefault2 + num;
-							}
-							else
-							{
-								item2 = null;
-							}
-							dictionary2[text3] = (panel, item2, fly);
-						}
-						num++;
-						continue;
 					}
+					else if (isFolder)
+					{
+						FileSystem.MoveDirectory(source, target, UIOption.AllDialogs);
+					}
+					else
+					{
+						FileSystem.MoveFile(source, target, UIOption.AllDialogs);
+					}
+					if (!copy)
+					{
+						RemoveEverywhere(source);
+					}
+					if (toDesktop && panel != null)
+					{
+						pendingPlace[target] = (panel, index is int i ? i + placed : null, fly);
+					}
+					placed++;
 				}
 				catch (OperationCanceledException)
 				{
+					// 사용자가 확인 창에서 취소
 				}
 				catch (Exception ex2)
 				{
 					Log(ex2);
-					MessageBox.Show($"{(copy ? "복사" : "이동")}하지 못했어요:\n{text}\n\n{ex2.Message}", "DesktopPop");
+					MessageBox.Show($"{(copy ? "복사" : "이동")}하지 못했어요:\n{file}\n\n{ex2.Message}", "DesktopPop");
 				}
 			}
 			ScheduleRefresh();
@@ -1122,20 +1122,20 @@ public sealed class App : Application
 
 	internal void DeleteSelected(ISelHost host, bool permanent)
 	{
-		string[] array = SelectedPaths(host).ToArray();
-		if (array.Length != 0)
+		string[] paths = SelectedPaths(host).ToArray();
+		if (paths.Length != 0)
 		{
 			Sel.Clear();
-			RecycleFiles(array, permanent);
+			RecycleFiles(paths, permanent);
 		}
 	}
 
 	internal void RenameSelected(ISelHost host)
 	{
-		List<string> list = Sel.Ordered(host);
-		if (list.Count == 1)
+		List<string> selected = Sel.Ordered(host);
+		if (selected.Count == 1)
 		{
-			DesktopItem desktopItem = Store.Get(list[0]);
+			DesktopItem desktopItem = Store.Get(selected[0]);
 			if (desktopItem != null && !desktopItem.IsVirtual)
 			{
 				RenameItem(desktopItem);
@@ -1145,11 +1145,11 @@ public sealed class App : Application
 
 	internal void OpenSelected(ISelHost host)
 	{
-		List<DesktopItem?> list = (from i in Sel.Ordered(host).Select(Store.Get)
+		List<DesktopItem?> toOpen = (from i in Sel.Ordered(host).Select(Store.Get)
 			where i != null
 			select i).ToList();
 		Sel.Clear();
-		foreach (DesktopItem item in list)
+		foreach (DesktopItem item in toOpen)
 		{
 			Shell.Launch(item);
 		}
@@ -1157,17 +1157,18 @@ public sealed class App : Application
 
 	internal void CopySelected(ISelHost host, bool cut)
 	{
-		List<string> list = SelectedPaths(host);
-		if (list.Count == 0)
+		List<string> paths = SelectedPaths(host);
+		if (paths.Count == 0)
 		{
 			return;
 		}
 		try
 		{
-			StringCollection stringCollection = new StringCollection();
-			stringCollection.AddRange(list.ToArray());
+			StringCollection fileList = new StringCollection();
+			fileList.AddRange(paths.ToArray());
 			DataObject dataObject = new DataObject();
-			dataObject.SetFileDropList(stringCollection);
+			dataObject.SetFileDropList(fileList);
+			// 탐색기가 "잘라내기(2)"인지 "복사(5)"인지 알 수 있게
 			dataObject.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(cut ? 2 : 5)));
 			Clipboard.SetDataObject(dataObject, copy: true);
 		}
@@ -1184,18 +1185,18 @@ public sealed class App : Application
 		{
 			return baseName;
 		}
-		int num = 2;
-		string text;
+		int n = 2;
+		string candidate;
 		while (true)
 		{
-			text = $"{baseName} ({num})";
-			if (!Exists(Path.Combine(desktopDir, text)))
+			candidate = $"{baseName} ({n})";
+			if (!Exists(Path.Combine(desktopDir, candidate)))
 			{
 				break;
 			}
-			num++;
+			n++;
 		}
-		return text;
+		return candidate;
 		static bool Exists(string p)
 		{
 			if (!File.Exists(p))
@@ -1213,32 +1214,32 @@ public sealed class App : Application
 
 	internal void CreateNewFolder(PanelConfig panel, int? index)
 	{
-		string text = InputDialog.Ask("새 폴더", "폴더 이름을 입력해 주세요", UniqueDesktopName("새 폴더"));
-		if (string.IsNullOrWhiteSpace(text))
+		string name = InputDialog.Ask("새 폴더", "폴더 이름을 입력해 주세요", UniqueDesktopName("새 폴더"));
+		if (string.IsNullOrWhiteSpace(name))
 		{
 			return;
 		}
-		if (!FileOperations.TryValidateName(text, out string error))
+		if (!FileOperations.TryValidateName(name, out string error))
 		{
 			MessageBox.Show(error, "DesktopPop");
 			return;
 		}
-		string text2 = Path.Combine(DesktopDir, text);
-		if (File.Exists(text2) || Directory.Exists(text2))
+		string path = Path.Combine(DesktopDir, name);
+		if (File.Exists(path) || Directory.Exists(path))
 		{
 			MessageBox.Show("바탕화면에 같은 이름이 이미 있어요.", "DesktopPop");
 			return;
 		}
 		try
 		{
-			Directory.CreateDirectory(text2);
+			Directory.CreateDirectory(path);
 		}
 		catch (Exception ex)
 		{
 			MessageBox.Show("폴더를 만들지 못했어요.\n" + ex.Message, "DesktopPop");
 			return;
 		}
-		pendingPlace[text2] = (panel, index, true);
+		pendingPlace[path] = (panel, index, true); // 마우스 자리에서 그 칸으로 날아가게
 		ScheduleRefresh();
 	}
 
@@ -1261,7 +1262,7 @@ public sealed class App : Application
 
 	internal void PasteToDesktop(PanelConfig panel, int? index)
 	{
-		bool flag = false;
+		bool wasCut = false;
 		string[] files;
 		try
 		{
@@ -1270,12 +1271,13 @@ public sealed class App : Application
 				return;
 			}
 			files = Clipboard.GetFileDropList().Cast<string>().ToArray();
-			if (Clipboard.GetData("Preferred DropEffect") is MemoryStream memoryStream)
+			// 탐색기에서 "잘라내기" 했으면 옮기기, "복사" 했으면 복사
+			if (Clipboard.GetData("Preferred DropEffect") is MemoryStream effectStream)
 			{
-				byte[] array = new byte[4];
-				if (memoryStream.Read(array, 0, 4) == 4)
+				byte[] effect = new byte[4];
+				if (effectStream.Read(effect, 0, 4) == 4)
 				{
-					flag = (BitConverter.ToInt32(array, 0) & 2) != 0;
+					wasCut = (BitConverter.ToInt32(effect, 0) & 2) != 0;
 				}
 			}
 		}
@@ -1284,8 +1286,8 @@ public sealed class App : Application
 			Log(ex);
 			return;
 		}
-		BringFilesToDesktop(files, !flag, panel, index);
-		if (flag)
+		BringFilesToDesktop(files, !wasCut, panel, index);
+		if (wasCut)
 		{
 			try
 			{
@@ -1319,31 +1321,32 @@ public sealed class App : Application
 			return;
 		}
 		string fileName = Path.GetFileName(item.Path.TrimEnd('\\'));
-		string text = InputDialog.Ask("이름 바꾸기", "새 이름을 입력해 주세요", fileName);
-		if (string.IsNullOrWhiteSpace(text) || text == fileName)
+		string newName = InputDialog.Ask("이름 바꾸기", "새 이름을 입력해 주세요", fileName);
+		if (string.IsNullOrWhiteSpace(newName) || newName == fileName)
 		{
 			return;
 		}
-		if (!FileOperations.TryValidateName(text, out string error))
+		if (!FileOperations.TryValidateName(newName, out string error))
 		{
 			MessageBox.Show(error, "DesktopPop");
 			return;
 		}
+		// 바로 가기는 확장자(.lnk/.url)를 빼먹어도 알아서 붙여 줌
 		string extension = Path.GetExtension(fileName);
-		if ((Eq(extension, ".lnk") || Eq(extension, ".url")) && !text.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+		if ((Eq(extension, ".lnk") || Eq(extension, ".url")) && !newName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
 		{
-			text += extension;
+			newName += extension;
 		}
-		string text2 = Path.Combine(Path.GetDirectoryName(item.Path.TrimEnd('\\')), text);
+		string newPath = Path.Combine(Path.GetDirectoryName(item.Path.TrimEnd('\\')), newName);
 		try
 		{
 			if (Directory.Exists(item.Path))
 			{
-				Directory.Move(item.Path, text2);
+				Directory.Move(item.Path, newPath);
 			}
 			else
 			{
-				File.Move(item.Path, text2);
+				File.Move(item.Path, newPath);
 			}
 		}
 		catch (Exception ex)
@@ -1351,7 +1354,7 @@ public sealed class App : Application
 			MessageBox.Show("이름을 바꾸지 못했어요.\n" + ex.Message, "DesktopPop");
 			return;
 		}
-		RemapPaths(item.Path, text2);
+		RemapPaths(item.Path, newPath); // 판·가방의 자리는 그대로
 		ScheduleRefresh();
 	}
 
@@ -1421,27 +1424,26 @@ public sealed class App : Application
 	internal void CreateBag(IReadOnlyList<string>? firstKeys)
 	{
 		Native.GetCursorPos(out var p);
-		Rect rect = Native.ToDipRect(Native.MonitorAt(p).WorkArea);
-		(string, string)? tuple = BagLibraryWindow.Pick(createMode: true, "가방");
-		if (!tuple.HasValue)
+		Rect workArea = Native.ToDipRect(Native.MonitorAt(p).WorkArea); // 만들기를 누른 모니터 가운데쯤에
+		// 가방 그림 보관함에서 그림 고르고 이름 정하기
+		(string, string)? picked = BagLibraryWindow.Pick(createMode: true, "가방");
+		if (!picked.HasValue)
 		{
 			return;
 		}
-		(string, string) value = tuple.Value;
-		string item = value.Item1;
-		string item2 = value.Item2;
+		var (imagePath, bagName) = picked.Value;
 		BagConfig bagConfig = new BagConfig
 		{
-			Name = item2,
-			ImagePath = item,
-			X = rect.Left + rect.Width / 2.0 + (double)(Config.Bags.Count % 4 * 40),
-			Y = rect.Top + rect.Height / 2.0 + (double)(Config.Bags.Count % 4 * 40)
+			Name = bagName,
+			ImagePath = imagePath,
+			X = workArea.Left + workArea.Width / 2.0 + (double)(Config.Bags.Count % 4 * 40),
+			Y = workArea.Top + workArea.Height / 2.0 + (double)(Config.Bags.Count % 4 * 40)
 		};
 		Config.Bags.Add(bagConfig);
-		foreach (string item3 in firstKeys ?? Array.Empty<string>())
+		foreach (string key in firstKeys ?? Array.Empty<string>())
 		{
-			RemoveEverywhere(item3);
-			bagConfig.Items.Add(item3);
+			RemoveEverywhere(key);
+			bagConfig.Items.Add(key);
 		}
 		Store.Refresh(Config);
 		BagWindow bagWindow = new BagWindow(bagConfig);
@@ -1456,9 +1458,10 @@ public sealed class App : Application
 
 	internal void SetTheme(string? accent, string? panel)
 	{
-		bool flag = string.Equals(accent, "#FF6EB4", StringComparison.OrdinalIgnoreCase) && string.Equals(panel, "#1A1026", StringComparison.OrdinalIgnoreCase);
-		Config.AccentColor = (flag ? null : accent);
-		Config.PanelColor = (flag ? null : panel);
+		// 기본 색이면 비워 둠 (나중에 기본 색이 바뀌면 따라가게)
+		bool isDefault = string.Equals(accent, "#FF6EB4", StringComparison.OrdinalIgnoreCase) && string.Equals(panel, "#1A1026", StringComparison.OrdinalIgnoreCase);
+		Config.AccentColor = (isDefault ? null : accent);
+		Config.PanelColor = (isDefault ? null : panel);
 		Theme.Apply(Config.AccentColor, Config.PanelColor);
 		Config.Save();
 		if (LeftPanel == null)
@@ -1469,7 +1472,6 @@ public sealed class App : Application
 		{
 			edgePanel.ApplyTheme();
 		}
-		panelButton?.UpdateState();
 		foreach (BagWindow bagWindow in BagWindows)
 		{
 			bagWindow.Rebuild();
@@ -1500,7 +1502,7 @@ public sealed class App : Application
 		}
 		// 전체 경로로 먼저 맞추고, 못 찾으면 (이름이 겹치지 않을 때만) 보이는 이름으로 맞춤
 		Dictionary<string, Native.POINT> byPath = new Dictionary<string, Native.POINT>(StringComparer.OrdinalIgnoreCase);
-		Dictionary<string, Native.POINT> dictionary = new Dictionary<string, Native.POINT>(StringComparer.OrdinalIgnoreCase);
+		Dictionary<string, Native.POINT> byName = new Dictionary<string, Native.POINT>(StringComparer.OrdinalIgnoreCase);
 		foreach (DesktopShell.IconPosition pos in positions)
 		{
 			if (pos.Path.Length > 0)
@@ -1509,70 +1511,73 @@ public sealed class App : Application
 			}
 			if (pos.Name.Length > 0)
 			{
-				dictionary.TryAdd(pos.Name, pos.Point);
+				byName.TryAdd(pos.Name, pos.Point);
 			}
 		}
-		IReadOnlyList<Native.MonitorInfo> readOnlyList = Native.Monitors();
-		Config.EnsurePanelLayout(readOnlyList[0].DeviceName, readOnlyList.Select((Native.MonitorInfo m) => m.DeviceName));
-		HashSet<string> connected = readOnlyList.Select((Native.MonitorInfo m) => m.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-		HashSet<string> hashSet = new HashSet<string>(Config.Bags.SelectMany((BagConfig b) => b.Items), StringComparer.OrdinalIgnoreCase);
-		HashSet<string> hashSet2 = Config.Panels.Where((PanelConfig panelConfig3) => !connected.Contains(panelConfig3.MonitorId)).SelectMany((PanelConfig panelConfig3) => panelConfig3.Items).ToHashSet(StringComparer.OrdinalIgnoreCase);
-		Dictionary<PanelConfig, List<(string, int, int)>> dictionary2 = new Dictionary<PanelConfig, List<(string, int, int)>>();
-		HashSet<string> hashSet3 = (from g in Store.DesktopItems.GroupBy((DesktopItem i) => i.Name, StringComparer.OrdinalIgnoreCase)
+		IReadOnlyList<Native.MonitorInfo> monitors = Native.Monitors();
+		Config.EnsurePanelLayout(monitors[0].DeviceName, monitors.Select((Native.MonitorInfo m) => m.DeviceName));
+		HashSet<string> connected = monitors.Select((Native.MonitorInfo m) => m.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+		HashSet<string> inBags = new HashSet<string>(Config.Bags.SelectMany((BagConfig b) => b.Items), StringComparer.OrdinalIgnoreCase);
+		// 지금 연결 안 된 모니터의 판에 있는 것은 건드리지 않음
+		HashSet<string> onDisconnectedMonitors = Config.Panels.Where((PanelConfig pc) => !connected.Contains(pc.MonitorId)).SelectMany((PanelConfig pc) => pc.Items).ToHashSet(StringComparer.OrdinalIgnoreCase);
+		Dictionary<PanelConfig, List<(string, int, int)>> byPanel = new Dictionary<PanelConfig, List<(string, int, int)>>();
+		HashSet<string> duplicateNames = (from g in Store.DesktopItems.GroupBy((DesktopItem i) => i.Name, StringComparer.OrdinalIgnoreCase)
 			where g.Count() > 1
 			select g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
 		foreach (DesktopItem desktopItem in Store.DesktopItems)
 		{
-			if (hashSet.Contains(desktopItem.Key) || hashSet2.Contains(desktopItem.Key))
+			if (inBags.Contains(desktopItem.Key) || onDisconnectedMonitors.Contains(desktopItem.Key))
 			{
 				continue;
 			}
-			if (!byPath.TryGetValue(desktopItem.Key, out var p) && (hashSet3.Contains(desktopItem.Name) || !dictionary.TryGetValue(desktopItem.Name, out p)))
+			if (!byPath.TryGetValue(desktopItem.Key, out var p) && (duplicateNames.Contains(desktopItem.Name) || !byName.TryGetValue(desktopItem.Name, out p)))
 			{
 				continue;
 			}
-			Native.MonitorInfo monitorInfo = readOnlyList.FirstOrDefault((Native.MonitorInfo m) => Native.Contains(m.Bounds, p));
-			if (!(monitorInfo == null))
+			Native.MonitorInfo onMonitor = monitors.FirstOrDefault((Native.MonitorInfo m) => Native.Contains(m.Bounds, p));
+			if (!(onMonitor == null))
 			{
-				Side side = ((!((double)(p.X + 40) < (double)(monitorInfo.Bounds.Left + monitorInfo.Bounds.Right) / 2.0)) ? Side.Right : Side.Left);
-				PanelConfig panel = Config.GetPanel(monitorInfo.DeviceName, side);
-				if (!dictionary2.TryGetValue(panel, out var value))
+				// 그 모니터의 왼쪽 절반에 있던 건 왼쪽 판, 오른쪽 절반은 오른쪽 판
+				Side side = ((!((double)(p.X + 40) < (double)(onMonitor.Bounds.Left + onMonitor.Bounds.Right) / 2.0)) ? Side.Right : Side.Left);
+				PanelConfig panel = Config.GetPanel(onMonitor.DeviceName, side);
+				if (!byPanel.TryGetValue(panel, out var placed))
 				{
-					value = (dictionary2[panel] = new List<(string, int, int)>());
+					placed = (byPanel[panel] = new List<(string, int, int)>());
 				}
-				value.Add((desktopItem.Key, p.X, p.Y));
+				placed.Add((desktopItem.Key, p.X, p.Y));
 			}
 		}
-		if (dictionary2.Count == 0)
+		if (byPanel.Count == 0)
 		{
 			return false;
 		}
-		foreach (string item in from item in dictionary2.Values.SelectMany((List<(string key, int x, int y)> items) => items)
+		foreach (string item in from item in byPanel.Values.SelectMany((List<(string key, int x, int y)> items) => items)
 			select item.key)
 		{
 			RemoveEverywhere(item);
 		}
-		foreach (var (panelConfig2, source) in dictionary2)
+		foreach (var (panelConfig, source) in byPanel)
 		{
-			IOrderedEnumerable<(string, int, int)> source2 = ((panelConfig2.Side == Side.Left) ? source.OrderBy(((string key, int x, int y) t) => t.x).ThenBy(((string key, int x, int y) t) => t.y) : source.OrderByDescending(((string key, int x, int y) t) => t.x).ThenBy(((string key, int x, int y) t) => t.y));
-			panelConfig2.Items.InsertRange(0, source2.Select(((string key, int x, int y) t) => t.key));
+			// 원래 바탕화면처럼 가장자리 쪽 줄부터, 줄 안에서는 위에서 아래로
+			IOrderedEnumerable<(string, int, int)> ordered = ((panelConfig.Side == Side.Left) ? source.OrderBy(((string key, int x, int y) t) => t.x).ThenBy(((string key, int x, int y) t) => t.y) : source.OrderByDescending(((string key, int x, int y) t) => t.x).ThenBy(((string key, int x, int y) t) => t.y));
+			panelConfig.Items.InsertRange(0, ordered.Select(((string key, int x, int y) t) => t.key));
 		}
 		return true;
 	}
 
 	internal void RereadLayout()
 	{
-		bool flag;
+		bool imported;
 		try
 		{
-			flag = ImportLayout();
+			imported = ImportLayout();
 		}
 		catch (Exception ex)
 		{
 			Log(ex);
-			flag = false;
+			imported = false;
 		}
-		if (!flag)
+		if (!imported)
 		{
 			MessageBox.Show("바탕화면 배치를 읽지 못했어요.\n'원래 바탕화면 아이콘 숨기기'를 잠깐 끄고 다시 시도해 보세요.", "DesktopPop");
 			return;
@@ -1608,6 +1613,7 @@ public sealed class App : Application
 		DesktopBand.Uninstall();
 		KeyboardHook.Uninstall();
 		GlobalHotkey.Dispose();
+		NativeShellMenu.Shutdown();
 		SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
 		foreach (FileSystemWatcher watcher in watchers)
 		{

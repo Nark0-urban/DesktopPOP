@@ -3,6 +3,7 @@ using System.Collections.Generic;
 
 namespace DesktopPop;
 
+/// <summary>우클릭 메뉴에 붙이는 DesktopPop 전용 항목 (글자, 할 일, 하위 메뉴).</summary>
 internal sealed class MenuEntry
 {
 	public string Text = "";

@@ -6,6 +6,7 @@ using System.Threading;
 
 namespace DesktopPop;
 
+/// <summary>DesktopPop 이 비정상 종료돼도 원래 바탕화면 아이콘을 다시 보이게 하는 감시 프로세스.</summary>
 internal static class DesktopRecovery
 {
 	private const string Flag = "--restore-desktop-on-exit";
@@ -20,14 +21,14 @@ internal static class DesktopRecovery
 		}
 		try
 		{
-			string text = "Local\\DesktopPop.Recovery." + Guid.NewGuid().ToString("N");
-			using EventWaitHandle eventWaitHandle = new EventWaitHandle(initialState: false, EventResetMode.ManualReset, text);
+			string readyEventName = "Local\\DesktopPop.Recovery." + Guid.NewGuid().ToString("N");
+			using EventWaitHandle eventWaitHandle = new EventWaitHandle(initialState: false, EventResetMode.ManualReset, readyEventName);
 			using Process process = Process.GetCurrentProcess();
 			ProcessStartInfo processStartInfo = SelfStartInfo();
 			processStartInfo.ArgumentList.Add("--restore-desktop-on-exit");
 			processStartInfo.ArgumentList.Add(process.Id.ToString(CultureInfo.InvariantCulture));
 			processStartInfo.ArgumentList.Add(process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture));
-			processStartInfo.ArgumentList.Add(text);
+			processStartInfo.ArgumentList.Add(readyEventName);
 			using Process process2 = Process.Start(processStartInfo);
 			armed = process2 != null && eventWaitHandle.WaitOne(TimeSpan.FromSeconds(5L));
 			if (!armed)
@@ -45,14 +46,14 @@ internal static class DesktopRecovery
 
 	internal static ProcessStartInfo SelfStartInfo()
 	{
-		string? text = Environment.ProcessPath ?? throw new InvalidOperationException("실행 파일 경로를 찾을 수 없습니다.");
-		ProcessStartInfo processStartInfo = new ProcessStartInfo(text)
+		string exe = Environment.ProcessPath ?? throw new InvalidOperationException("실행 파일 경로를 찾을 수 없습니다.");
+		ProcessStartInfo processStartInfo = new ProcessStartInfo(exe)
 		{
 			UseShellExecute = false,
 			CreateNoWindow = true,
 			WindowStyle = ProcessWindowStyle.Hidden
 		};
-		if (string.Equals(Path.GetFileNameWithoutExtension(text), "dotnet", StringComparison.OrdinalIgnoreCase))
+		if (string.Equals(Path.GetFileNameWithoutExtension(exe), "dotnet", StringComparison.OrdinalIgnoreCase))
 		{
 			processStartInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, typeof(App).Assembly.GetName().Name + ".dll"));
 		}
@@ -98,16 +99,16 @@ internal static class DesktopRecovery
 			}
 			process.WaitForExit();
 			using Mutex mutex = new Mutex(initiallyOwned: false, "DesktopPop.SingleInstance.v1");
-			bool flag;
+			bool mainGone;
 			try
 			{
-				flag = mutex.WaitOne(0);
+				mainGone = mutex.WaitOne(0);
 			}
 			catch (AbandonedMutexException)
 			{
-				flag = true;
+				mainGone = true; // 본체가 비정상 종료됨
 			}
-			if (!flag)
+			if (!mainGone)
 			{
 				return true;
 			}

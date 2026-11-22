@@ -11,6 +11,11 @@ using System.Windows.Threading;
 
 namespace DesktopPop;
 
+/// <summary>
+/// 원래 바탕화면 같은 단축키(Delete, Shift+Delete, F2, Enter, Esc, Ctrl+A/C/X)를 판·가방에서 선택한 아이콘에 적용하는 키보드 감시.
+/// 선택된 게 있고 바탕화면이나 DesktopPop 창이 맨 앞일 때만 키를 가져가며, 다른 프로그램에서 타자 칠 때는 건드리지 않음.
+/// 모두 펼친 상태에서 다른 곳 키 입력을 보고 접는 일도 여기서 알려 줌.
+/// </summary>
 internal static class KeyboardHook
 {
 	private delegate nint LowLevelKeyboardProc(int nCode, nint wParam, nint lParam);
@@ -122,15 +127,19 @@ internal static class KeyboardHook
 		return (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
 	}
 
+	/// <summary>
+	/// 지금 이 키를 DesktopPop 이 가져가도 되는지: 선택한 판·가방이 보이고, 바탕화면이나 그 창이 맨 앞이고,
+	/// 메뉴가 열려 있거나 글자를 입력하는 칸에 있는 게 아닐 때만.
+	/// </summary>
 	private static bool OurTurn(ISelHost host)
 	{
 		if (suspended > 0 || App.OpenMenus > 0 || App.DragSource != null || !host.BandSelectable || !(host is Window { IsVisible: not false, IsEnabled: not false } window))
 		{
 			return false;
 		}
-		nint foregroundWindow = Native.GetForegroundWindow();
-		nint handle = new WindowInteropHelper(window).Handle;
-		if (handle == IntPtr.Zero || (foregroundWindow != handle && !Native.IsDesktopForeground()))
+		nint foreground = Native.GetForegroundWindow();
+		nint hostHandle = new WindowInteropHelper(window).Handle;
+		if (hostHandle == IntPtr.Zero || (foreground != hostHandle && !Native.IsDesktopForeground()))
 		{
 			return false;
 		}
@@ -142,200 +151,118 @@ internal static class KeyboardHook
 		{
 			return false;
 		}
+		// 메뉴·이동·크기 조절 중 (GUI_INMENUMODE | GUI_INMOVESIZE | GUI_POPUPMENUMODE)
 		if ((info.flags & 0x1C) != 0 || info.hwndMenuOwner != IntPtr.Zero)
 		{
 			return false;
 		}
-		StringBuilder stringBuilder = new StringBuilder(128);
-		GetClassName(info.hwndFocus, stringBuilder, stringBuilder.Capacity);
-		string text = stringBuilder.ToString();
-		if (text.Equals("Edit", StringComparison.OrdinalIgnoreCase) || text.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase))
+		StringBuilder focusClass = new StringBuilder(128);
+		GetClassName(info.hwndFocus, focusClass, focusClass.Capacity);
+		string focusClassName = focusClass.ToString();
+		if (focusClassName.Equals("Edit", StringComparison.OrdinalIgnoreCase) || focusClassName.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase))
 		{
-			return false;
+			return false; // 이름 바꾸기 같은 입력 칸
 		}
-		bool flag = foregroundWindow == handle;
-		if (flag)
+		if (foreground == hostHandle)
 		{
-			IInputElement focusedElement = Keyboard.FocusedElement;
-			bool flag2 = ((focusedElement is TextBoxBase || focusedElement is PasswordBox) ? true : false);
-			flag = flag2 || (Keyboard.FocusedElement is ComboBox comboBox && comboBox.IsEditable);
-		}
-		if (flag)
-		{
-			return false;
+			IInputElement focused = Keyboard.FocusedElement;
+			bool typingInWpf = focused is TextBoxBase || focused is PasswordBox || (focused is ComboBox comboBox && comboBox.IsEditable);
+			if (typingInWpf)
+			{
+				return false;
+			}
 		}
 		return true;
 	}
+
+	private const int WM_KEYDOWN = 0x100, WM_SYSKEYDOWN = 0x104;
+
+	private const int VK_RETURN = 0x0D, VK_ESCAPE = 0x1B, VK_DELETE = 0x2E, VK_A = 0x41, VK_C = 0x43, VK_X = 0x58, VK_F2 = 0x71;
+
+	private const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12;
 
 	private static nint HookProc(int nCode, nint wParam, nint lParam)
 	{
 		try
 		{
-			int num = ((IntPtr)wParam).ToInt32();
-			int num2;
-			int num3;
-			if (nCode >= 0)
+			int message = ((IntPtr)wParam).ToInt32();
+			bool keyDown = nCode >= 0 && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN);
+			int vk = keyDown ? Marshal.ReadInt32(lParam) : 0; // KBDLLHOOKSTRUCT 맨 앞이 키 코드
+			if (keyDown)
 			{
-				if (num != 256)
+				// 모두 펼친 상태에서 다른 곳에서 키를 누르면 접기 (펼치기 단축키 자체는 제외)
+				App.Instance.ObserveGlobalKeyboardInput(vk);
+			}
+			bool handledKey = keyDown && vk is VK_RETURN or VK_ESCAPE or VK_DELETE or VK_A or VK_C or VK_X or VK_F2;
+			ISelHost? host = Sel.Host;
+			if (handledKey && host != null && Sel.Keys.Count > 0)
+			{
+				bool ctrl = Down(VK_CONTROL);
+				bool shift = Down(VK_SHIFT);
+				bool alt = Down(VK_MENU);
+				// 원래 바탕화면 단축키만: Delete / Shift+Delete / F2 / Enter / Esc / Ctrl+A / Ctrl+C / Ctrl+X
+				bool isShortcut = !alt && (ctrl
+					? (!shift && vk is VK_A or VK_C or VK_X)
+					: (vk is VK_RETURN or VK_ESCAPE or VK_DELETE || (vk == VK_F2 && !shift)));
+				if (!isShortcut || !OurTurn(host))
 				{
-					num2 = ((num == 260) ? 1 : 0);
-					if (num2 == 0)
+					return CallNextHookEx(hook, nCode, wParam, lParam);
+				}
+				Action? act = null;
+				if (!ctrl)
+				{
+					switch (vk)
 					{
-						goto IL_002b;
+					case VK_DELETE:
+						act = shift
+							? () => App.Instance.DeleteSelected(host, permanent: true)
+							: () => App.Instance.DeleteSelected(host, permanent: false);
+						break;
+					case VK_F2:
+						act = () => App.Instance.RenameSelected(host);
+						break;
+					case VK_RETURN:
+						if (!shift)
+						{
+							act = () => App.Instance.OpenSelected(host);
+						}
+						break;
+					case VK_ESCAPE:
+						act = () => Sel.Clear();
+						break;
 					}
 				}
 				else
 				{
-					num2 = 1;
+					switch (vk)
+					{
+					case VK_A:
+						act = () => Sel.Set(host, host.OrderedKeys);
+						break;
+					case VK_C:
+						act = () => App.Instance.CopySelected(host, cut: false);
+						break;
+					case VK_X:
+						act = () => App.Instance.CopySelected(host, cut: true);
+						break;
+					}
 				}
-				num3 = Marshal.ReadInt32(lParam);
-				goto IL_0034;
-			}
-			num2 = 0;
-			goto IL_002b;
-			IL_002b:
-			num3 = 0;
-			goto IL_0034;
-			IL_0034:
-			int num4 = num3;
-			if (num2 != 0)
-			{
-				App.Instance.ObserveGlobalKeyboardInput(num4);
-			}
-			bool flag = (byte)num2 != 0;
-			if (flag)
-			{
-				bool flag2;
-				switch (num4)
+				if (act != null)
 				{
-				case 13:
-				case 27:
-				case 46:
-				case 65:
-				case 67:
-				case 88:
-				case 113:
-					flag2 = true;
-					break;
-				default:
-					flag2 = false;
-					break;
-				}
-				flag = flag2;
-			}
-			if (flag)
-			{
-				ISelHost host = Sel.Host;
-				if (host != null && Sel.Keys.Count > 0)
-				{
-					bool flag3 = Down(17);
-					bool flag4 = Down(16);
-					bool flag5 = Down(18);
-					flag = !flag5;
-					if (flag)
+					// 실제 처리는 UI 스레드에서. 그 사이 선택이 바뀌었거나 차례가 아니면 하지 않음
+					string[] keysAtPress = Sel.Keys.ToArray();
+					dispatcher?.InvokeAsync(() =>
 					{
-						bool flag2;
-						if (flag3)
+						if (Sel.Host != host || !keysAtPress.SequenceEqual(Sel.Keys, StringComparer.OrdinalIgnoreCase) || !OurTurn(host))
 						{
-							bool flag6 = !flag4;
-							if (flag6)
-							{
-								bool flag7 = ((num4 == 65 || num4 == 67 || num4 == 88) ? true : false);
-								flag6 = flag7;
-							}
-							flag2 = flag6;
+							return;
 						}
-						else
+						using (Suspend())
 						{
-							bool flag6 = ((num4 == 13 || num4 == 27 || num4 == 46) ? true : false);
-							flag2 = flag6 || (num4 == 113 && !flag4);
+							act();
 						}
-						flag = flag2;
-					}
-					if (!flag || !OurTurn(host))
-					{
-						return CallNextHookEx(hook, nCode, wParam, lParam);
-					}
-					Action act = null;
-					if (!flag3 && !flag5)
-					{
-						switch (num4)
-						{
-						case 46:
-							act = (flag4 ? ((Action)(() =>
-							{
-								App.Instance.DeleteSelected(host, permanent: true);
-							})) : ((Action)(() =>
-							{
-								App.Instance.DeleteSelected(host, permanent: false);
-							})));
-							break;
-						case 113:
-							if (!flag4)
-							{
-								act = () =>
-								{
-									App.Instance.RenameSelected(host);
-								};
-							}
-							break;
-						case 13:
-							if (!flag4)
-							{
-								act = () =>
-								{
-									App.Instance.OpenSelected(host);
-								};
-							}
-							break;
-						case 27:
-							act = () =>
-							{
-								Sel.Clear();
-							};
-							break;
-						}
-					}
-					else if (flag3 && !flag5 && !flag4)
-					{
-						switch (num4)
-						{
-						case 65:
-							act = () =>
-							{
-								Sel.Set(host, host.OrderedKeys);
-							};
-							break;
-						case 67:
-							act = () =>
-							{
-								App.Instance.CopySelected(host, cut: false);
-							};
-							break;
-						case 88:
-							act = () =>
-							{
-								App.Instance.CopySelected(host, cut: true);
-							};
-							break;
-						}
-					}
-					if (act != null)
-					{
-						string[] keys = Sel.Keys.ToArray();
-						dispatcher?.InvokeAsync(() =>
-						{
-							if (Sel.Host != host || !keys.SequenceEqual(Sel.Keys, StringComparer.OrdinalIgnoreCase) || !OurTurn(host))
-							{
-								return;
-							}
-							using (Suspend())
-							{
-								act();
-							}
-						}, DispatcherPriority.Input);
-						return new IntPtr(1);
-					}
+					}, DispatcherPriority.Input);
+					return new IntPtr(1); // 이 키는 DesktopPop 이 처리 (숨겨진 원래 바탕화면이 엉뚱한 걸 지우지 않게)
 				}
 			}
 		}

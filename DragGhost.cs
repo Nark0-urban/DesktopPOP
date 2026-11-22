@@ -7,6 +7,7 @@ using System.Windows.Media.Effects;
 
 namespace DesktopPop;
 
+/// <summary>아이콘을 끄는 동안 마우스를 따라다니는 반투명 그림.</summary>
 internal sealed class DragGhost : Window
 {
 	private readonly double scale;
@@ -100,9 +101,10 @@ internal sealed class DragGhost : Window
 		{
 			hwnd = new WindowInteropHelper(this).Handle;
 			Native.MakeToolWindow(hwnd);
-			long num = ((IntPtr)Native.GetWindowLongPtr(hwnd, -20)).ToInt64();
-			num |= 0x8080020;
-			Native.SetWindowLongPtr(hwnd, -20, new IntPtr(num));
+			// 클릭이 통과하고(WS_EX_TRANSPARENT) 활성화되지 않는(WS_EX_NOACTIVATE) 반투명(WS_EX_LAYERED) 창
+			long exStyle = ((IntPtr)Native.GetWindowLongPtr(hwnd, -20)).ToInt64();
+			exStyle |= 0x8080020;
+			Native.SetWindowLongPtr(hwnd, -20, new IntPtr(exStyle));
 		};
 	}
 
@@ -113,19 +115,18 @@ internal sealed class DragGhost : Window
 			return;
 		}
 		double widthDip = ((ActualWidth > 0.0) ? ActualWidth : 118.0);
-		(int, int) tuple = OverlayMotion.GhostPosition(p.X, p.Y, widthDip, scale);
+		(int, int) target = OverlayMotion.GhostPosition(p.X, p.Y, widthDip, scale);
 		if (lastPosition.HasValue)
 		{
 			(int, int) value = lastPosition.Value;
-			(int, int) tuple2 = tuple;
-			if (value.Item1 == tuple2.Item1 && value.Item2 == tuple2.Item2)
+			if (value.Item1 == target.Item1 && value.Item2 == target.Item2) // 그대로면 창을 옮기지 않음
 			{
 				return;
 			}
 		}
-		if (Native.SetWindowPos(hwnd, IntPtr.Zero, tuple.Item1, tuple.Item2, 0, 0, 21u))
+		if (Native.SetWindowPos(hwnd, IntPtr.Zero, target.Item1, target.Item2, 0, 0, 21u))
 		{
-			lastPosition = tuple;
+			lastPosition = target;
 		}
 	}
 

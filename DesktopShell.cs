@@ -5,6 +5,7 @@ using System.Text;
 
 namespace DesktopPop;
 
+/// <summary>진짜 바탕화면(탐색기) 아이콘 숨기기·보이기, 원래 아이콘 배치 읽기.</summary>
 internal static class DesktopShell
 {
 	[DllImport("user32.dll", SetLastError = true)]
@@ -17,24 +18,25 @@ internal static class DesktopShell
 
 	private static nint FindDefView()
 	{
-		nint num = Native.FindWindowEx(FindProgman(), IntPtr.Zero, "SHELLDLL_DefView", null);
-		if (num != IntPtr.Zero)
+		// 바탕화면 아이콘 목록을 가진 창: 보통 Progman 안, 배경 화면 슬라이드쇼 등을 쓰면 WorkerW 안
+		nint inProgman = Native.FindWindowEx(FindProgman(), IntPtr.Zero, "SHELLDLL_DefView", null);
+		if (inProgman != IntPtr.Zero)
 		{
-			return num;
+			return inProgman;
 		}
 		nint found = IntPtr.Zero;
 		Native.EnumWindows((nint h, nint l) =>
 		{
-			StringBuilder stringBuilder = new StringBuilder(32);
-			Native.GetClassName(h, stringBuilder, 32);
-			if (stringBuilder.ToString() != "WorkerW")
+			StringBuilder className = new StringBuilder(32);
+			Native.GetClassName(h, className, 32);
+			if (className.ToString() != "WorkerW")
 			{
 				return true;
 			}
-			nint num2 = Native.FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
-			if (num2 != IntPtr.Zero)
+			nint defView = Native.FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null);
+			if (defView != IntPtr.Zero)
 			{
-				found = num2;
+				found = defView;
 				return false;
 			}
 			return true;
@@ -44,33 +46,34 @@ internal static class DesktopShell
 
 	private static nint FindListView()
 	{
-		nint num = FindDefView();
-		if (num != IntPtr.Zero)
+		nint defView = FindDefView();
+		if (defView != IntPtr.Zero)
 		{
-			return Native.FindWindowEx(num, IntPtr.Zero, "SysListView32", null);
+			return Native.FindWindowEx(defView, IntPtr.Zero, "SysListView32", null);
 		}
 		return IntPtr.Zero;
 	}
 
 	public static bool? IconsVisible()
 	{
-		nint num = FindListView();
-		if (num == IntPtr.Zero)
+		nint listView = FindListView();
+		if (listView == IntPtr.Zero)
 		{
 			return null;
 		}
-		return Native.IsWindowVisible(num);
+		return Native.IsWindowVisible(listView);
 	}
 
 	public static void SetIconsVisible(bool visible)
 	{
-		bool? flag = IconsVisible();
-		if (flag.HasValue && flag != visible)
+		bool? visibleNow = IconsVisible();
+		if (visibleNow.HasValue && visibleNow != visible)
 		{
-			nint num = FindDefView();
-			if (num != IntPtr.Zero)
+			nint defView = FindDefView();
+			if (defView != IntPtr.Zero)
 			{
-				SendMessageTimeout(num, 273u, new IntPtr(29698), IntPtr.Zero, 2u, 1000u, out var _);
+				// 바탕화면 우클릭 → 보기 → "바탕 화면 아이콘 표시" 와 같은 명령 (WM_COMMAND 0x7402). 탐색기가 멈춰 있어도 1초만 기다림
+				SendMessageTimeout(defView, 273u, new IntPtr(29698), IntPtr.Zero, 2u, 1000u, out var _);
 			}
 		}
 	}

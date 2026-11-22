@@ -3,6 +3,7 @@ using System.Windows;
 
 namespace DesktopPop;
 
+/// <summary>아이콘 열기·파일 위치 열기·속성 보기 (실제 실행은 도우미 프로세스가 함).</summary>
 internal static class Shell
 {
 	public static bool TryRunHelper(string[] args)

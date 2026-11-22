@@ -5,6 +5,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>기본 가방 그림 중 "스팀펑크" 6종 (코드로 그린 벡터 그림).</summary>
 internal static class SteampunkIcons
 {
 	private const string Ink = "#35261D";
@@ -42,15 +43,15 @@ internal static class SteampunkIcons
 
 	private static Brush Metal(bool copper = false)
 	{
-		string[] array = ((!copper) ? new string[5] { "#FAE3AE", "#CBA768", "#88602F", "#E6C27B", "#977044" } : new string[5] { "#F2C3A0", "#BC7951", "#7E442B", "#D8966C", "#79452F" });
+		string[] stops = ((!copper) ? new string[5] { "#FAE3AE", "#CBA768", "#88602F", "#E6C27B", "#977044" } : new string[5] { "#F2C3A0", "#BC7951", "#7E442B", "#D8966C", "#79452F" });
 		LinearGradientBrush linearGradientBrush = new LinearGradientBrush
 		{
 			StartPoint = new Point(0.0, 0.0),
 			EndPoint = new Point(1.0, 1.0)
 		};
-		for (int i = 0; i < array.Length; i++)
+		for (int i = 0; i < stops.Length; i++)
 		{
-			linearGradientBrush.GradientStops.Add(new GradientStop(C(array[i]), (double)i / 4.0));
+			linearGradientBrush.GradientStops.Add(new GradientStop(C(stops[i]), (double)i / 4.0));
 		}
 		return linearGradientBrush;
 	}
@@ -93,11 +94,12 @@ internal static class SteampunkIcons
 		{
 			for (int i = 0; i < 48; i++)
 			{
-				double num = Math.PI * 2.0 * (double)i / 48.0;
-				int num2 = i % 4;
-				bool flag = ((num2 == 0 || num2 == 3) ? true : false);
-				double num3 = (flag ? (radius * 0.82) : radius);
-				Point point = new Point(x + Math.Cos(num) * num3, y + Math.Sin(num) * num3);
+				// 톱니: 48 개 점 중 4 개마다 2 개는 안쪽(골), 2 개는 바깥(이)
+				double angle = Math.PI * 2.0 * (double)i / 48.0;
+				int phase = i % 4;
+				bool valley = phase == 0 || phase == 3;
+				double r = (valley ? (radius * 0.82) : radius);
+				Point point = new Point(x + Math.Cos(angle) * r, y + Math.Sin(angle) * r);
 				if (i == 0)
 				{
 					streamGeometryContext.BeginFigure(point, isFilled: true, isClosed: true);
@@ -116,9 +118,9 @@ internal static class SteampunkIcons
 		DrawingGroup drawingGroup = new DrawingGroup();
 		for (int i = 0; i <= count; i++)
 		{
-			double num = (begin + (end - begin) * (double)i / (double)count) * Math.PI / 180.0;
-			double num2 = radius - ((i % 3 == 0) ? 3.0 : 1.7);
-			drawingGroup.Children.Add(new GeometryDrawing(null, P("#89633E", 0.6), new LineGeometry(new Point(x + num2 * Math.Cos(num), y + num2 * Math.Sin(num)), new Point(x + radius * Math.Cos(num), y + radius * Math.Sin(num)))));
+			double angle = (begin + (end - begin) * (double)i / (double)count) * Math.PI / 180.0;
+			double inner = radius - ((i % 3 == 0) ? 3.0 : 1.7); // 3 개마다 긴 눈금
+			drawingGroup.Children.Add(new GeometryDrawing(null, P("#89633E", 0.6), new LineGeometry(new Point(x + inner * Math.Cos(angle), y + inner * Math.Sin(angle)), new Point(x + radius * Math.Cos(angle), y + radius * Math.Sin(angle)))));
 		}
 		return drawingGroup;
 	}

@@ -3,6 +3,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>판·가방에 보이는 아이콘 하나 (경로, 이름, 아이콘 그림, 폴더·바로 가기 여부).</summary>
 internal sealed class DesktopItem
 {
 	public string Key = "";

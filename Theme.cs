@@ -4,6 +4,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>색상 테마 (강조색·판 배경색과 거기서 나오는 색들).</summary>
 internal static class Theme
 {
 	public const string DefaultAccent = "#FF6EB4";
@@ -53,17 +54,17 @@ internal static class Theme
 		Panel = color2;
 		Color value = color;
 		Color? color3 = Parse("#FF6EB4");
-		bool num = value == color3;
+		bool defaultAccent = value == color3;
 		value = color2;
 		color3 = Parse("#1A1026");
-		bool flag = value == color3;
-		Badge = (num ? Color.FromRgb(224, 69, 123) : Shade(color, -0.15));
-		Glow = (num ? Color.FromRgb(byte.MaxValue, 150, 210) : Shade(color, 0.3));
-		TrayA = (num ? Color.FromRgb(236, 72, 153) : color);
-		TrayB = (num ? Color.FromRgb(124, 58, 237) : Shade(color, -0.4));
-		Halo = (flag ? Color.FromRgb(20, 10, 32) : Shade(color2, -0.25));
-		Backdrop = (flag ? Color.FromRgb(24, 16, 34) : color2);
-		Hint = (flag ? Color.FromRgb(34, 22, 48) : Shade(color2, 0.06));
+		bool defaultPanel = value == color3;
+		Badge = (defaultAccent ? Color.FromRgb(224, 69, 123) : Shade(color, -0.15));
+		Glow = (defaultAccent ? Color.FromRgb(byte.MaxValue, 150, 210) : Shade(color, 0.3));
+		TrayA = (defaultAccent ? Color.FromRgb(236, 72, 153) : color);
+		TrayB = (defaultAccent ? Color.FromRgb(124, 58, 237) : Shade(color, -0.4));
+		Halo = (defaultPanel ? Color.FromRgb(20, 10, 32) : Shade(color2, -0.25));
+		Backdrop = (defaultPanel ? Color.FromRgb(24, 16, 34) : color2);
+		Hint = (defaultPanel ? Color.FromRgb(34, 22, 48) : Shade(color2, 0.06));
 	}
 
 	public static Brush Brush(Color c, byte alpha = byte.MaxValue)
@@ -97,8 +98,8 @@ internal static class Theme
 		{
 			return null;
 		}
-		string text = hex.Trim().TrimStart('#');
-		if (text.Length != 6 || !int.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var result))
+		string digits = hex.Trim().TrimStart('#');
+		if (digits.Length != 6 || !int.TryParse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var result))
 		{
 			return null;
 		}

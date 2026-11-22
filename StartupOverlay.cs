@@ -9,6 +9,7 @@ using System.Windows.Shapes;
 
 namespace DesktopPop;
 
+/// <summary>켤 때 연출: 가운데 로딩 원 → 빛줄기가 훑으며 원래 아이콘이 사라짐.</summary>
 internal sealed class StartupOverlay : Window
 {
 	private readonly Grid root = new Grid();
@@ -46,9 +47,10 @@ internal sealed class StartupOverlay : Window
 		{
 			nint handle = new WindowInteropHelper(this).Handle;
 			Native.MakeToolWindow(handle);
-			long num = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
-			num |= 0x8080020;
-			Native.SetWindowLongPtr(handle, -20, new IntPtr(num));
+			// 클릭이 통과하고(WS_EX_TRANSPARENT) 활성화되지 않는(WS_EX_NOACTIVATE) 반투명(WS_EX_LAYERED) 창
+			long exStyle = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
+			exStyle |= 0x8080020;
+			Native.SetWindowLongPtr(handle, -20, new IntPtr(exStyle));
 		};
 		Color accent = Theme.Accent;
 		RadialGradientBrush background = new RadialGradientBrush
@@ -208,18 +210,18 @@ internal sealed class StartupOverlay : Window
 			Stretch = Stretch.None
 		};
 		drawingBrush.Freeze();
-		double num = Math.Max(500.0, w * 0.45);
-		double num2 = 30.0;
+		double trail = Math.Max(500.0, w * 0.45); // 빛줄기 뒤로 어두워지는 꼬리 길이
+		double head = 30.0;
 		LinearGradientBrush linearGradientBrush = new LinearGradientBrush
 		{
 			MappingMode = BrushMappingMode.Absolute,
-			StartPoint = new Point(0.0 - num, 0.0),
-			EndPoint = new Point(num2, 0.0)
+			StartPoint = new Point(0.0 - trail, 0.0),
+			EndPoint = new Point(head, 0.0)
 		};
-		double num3 = num / (num + num2);
+		double edge = trail / (trail + head);
 		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.0));
-		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(85, 0, 0, 0), num3 * 0.6));
-		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(byte.MaxValue, 0, 0, 0), num3));
+		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(85, 0, 0, 0), edge * 0.6));
+		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(byte.MaxValue, 0, 0, 0), edge));
 		linearGradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 1.0));
 		TranslateTransform translateTransform = (TranslateTransform)(linearGradientBrush.Transform = new TranslateTransform(-22.399999999999977, 0.0));
 		Rectangle grid = new Rectangle

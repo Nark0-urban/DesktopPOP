@@ -7,6 +7,7 @@ using System.Text.Json;
 
 namespace DesktopPop;
 
+/// <summary>설정 파일(data\config.json): 판별 아이콘 순서, 가방, 색상, 단축키 등. 저장 위치는 exe 옆 data 폴더 (쓸 수 없으면 사용자 폴더).</summary>
 internal sealed class AppConfig
 {
 	private static readonly JsonSerializerOptions Opts = new JsonSerializerOptions
@@ -29,10 +30,6 @@ internal sealed class AppConfig
 
 	public bool HideDesktopIcons { get; set; } = true;
 
-	public bool DisableInFullscreen { get; set; } = true;
-
-	public bool BlockWhenMaximized { get; set; } = true;
-
 	public bool ShowStartupAnimation { get; set; } = true;
 
 	public bool LibrarySeeded { get; set; }
@@ -43,6 +40,9 @@ internal sealed class AppConfig
 
 	public bool SingleClickLaunch { get; set; }
 
+	/// <summary>아이콘 우클릭에 Windows 원래 메뉴(압축·보내기 등)를 띄움. 끄면 DesktopPop 간단 메뉴.</summary>
+	public bool UseWindowsMenu { get; set; } = true;
+
 	public string? AccentColor { get; set; }
 
 	public string? PanelColor { get; set; }
@@ -52,12 +52,6 @@ internal sealed class AppConfig
 	public bool LayoutImported { get; set; }
 
 	public bool FirstRunDone { get; set; }
-
-	public bool ShowPanelButton { get; set; } = true;
-
-	public double? PanelButtonX { get; set; }
-
-	public double? PanelButtonY { get; set; }
 
 	/// <summary>모든 패널과 가방을 펼치기/접기 단축키. 빈 문자열이면 끔.</summary>
 	public string ToggleHotkey { get; set; } = GlobalHotkey.Default;
@@ -144,28 +138,28 @@ internal sealed class AppConfig
 		{
 			return;
 		}
-		bool flag = Left.Count > 0 || Right.Count > 0;
-		HashSet<string> hashSet = new HashSet<string>(Panels.SelectMany((PanelConfig p) => p.Items).Concat(Bags.SelectMany((BagConfig b) => b.Items)), StringComparer.OrdinalIgnoreCase);
-		(List<string>, Side)[] array = new (List<string>, Side)[2]
+		// 1.1.0 전 설정(왼쪽/오른쪽 목록 하나씩)을 주 모니터 판으로 옮김
+		bool hadOldLayout = Left.Count > 0 || Right.Count > 0;
+		HashSet<string> alreadyPlaced = new HashSet<string>(Panels.SelectMany((PanelConfig p) => p.Items).Concat(Bags.SelectMany((BagConfig b) => b.Items)), StringComparer.OrdinalIgnoreCase);
+		(List<string>, Side)[] oldLists = new (List<string>, Side)[2]
 		{
 			(Left, Side.Left),
 			(Right, Side.Right)
 		};
-		for (int num = 0; num < array.Length; num++)
+		foreach (var (oldList, side) in oldLists)
 		{
-			var (list, side) = array[num];
-			foreach (string item2 in list)
+			foreach (string key in oldList)
 			{
-				if (!string.IsNullOrWhiteSpace(item2) && hashSet.Add(item2))
+				if (!string.IsNullOrWhiteSpace(key) && alreadyPlaced.Add(key))
 				{
-					GetPanel(primaryId, side).Items.Add(item2);
+					GetPanel(primaryId, side).Items.Add(key);
 				}
 			}
 		}
 		Left.Clear();
 		Right.Clear();
 		PanelLayoutMigrated = true;
-		if (flag)
+		if (hadOldLayout)
 		{
 			LayoutImported = true;
 		}
@@ -200,10 +194,10 @@ internal sealed class AppConfig
 		{
 			RemoveItemEverywhere(item);
 		}
-		int num = ((beforeKey == null) ? (-1) : target.Items.FindIndex((string k) => string.Equals(k, beforeKey, StringComparison.OrdinalIgnoreCase)));
-		if (num >= 0)
+		int insertAt = ((beforeKey == null) ? (-1) : target.Items.FindIndex((string k) => string.Equals(k, beforeKey, StringComparison.OrdinalIgnoreCase)));
+		if (insertAt >= 0)
 		{
-			target.Items.InsertRange(num, list);
+			target.Items.InsertRange(insertAt, list);
 		}
 		else
 		{
@@ -215,27 +209,27 @@ internal sealed class AppConfig
 	{
 		try
 		{
-			string text = Path.Combine(OldDir, "config.json");
-			if (File.Exists(FilePath) || !File.Exists(text))
+			string oldConfig = Path.Combine(OldDir, "config.json");
+			if (File.Exists(FilePath) || !File.Exists(oldConfig))
 			{
 				return;
 			}
 			Directory.CreateDirectory(Dir);
-			File.Copy(text, FilePath);
+			File.Copy(oldConfig, FilePath);
 			string path = Path.Combine(OldDir, "images");
 			if (!Directory.Exists(path))
 			{
 				return;
 			}
-			string text2 = Path.Combine(Dir, "images");
-			Directory.CreateDirectory(text2);
+			string newImages = Path.Combine(Dir, "images");
+			Directory.CreateDirectory(newImages);
 			string[] files = Directory.GetFiles(path);
-			foreach (string text3 in files)
+			foreach (string image in files)
 			{
-				string text4 = Path.Combine(text2, Path.GetFileName(text3));
-				if (!File.Exists(text4))
+				string dest = Path.Combine(newImages, Path.GetFileName(image));
+				if (!File.Exists(dest))
 				{
-					File.Copy(text3, text4);
+					File.Copy(image, dest);
 				}
 			}
 		}
@@ -251,10 +245,10 @@ internal sealed class AppConfig
 		{
 			if (!string.IsNullOrEmpty(bag.ImagePath) && !File.Exists(bag.ImagePath))
 			{
-				string text = Path.Combine(Dir, "images", Path.GetFileName(bag.ImagePath));
-				if (File.Exists(text))
+				string local = Path.Combine(Dir, "images", Path.GetFileName(bag.ImagePath));
+				if (File.Exists(local))
 				{
-					bag.ImagePath = text;
+					bag.ImagePath = local;
 				}
 			}
 		}
@@ -267,9 +261,9 @@ internal sealed class AppConfig
 		{
 			if (File.Exists(FilePath))
 			{
-				AppConfig? obj = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(FilePath), Opts) ?? new AppConfig();
-				obj.FixImagePaths();
-				return obj;
+				AppConfig loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(FilePath), Opts) ?? new AppConfig();
+				loaded.FixImagePaths();
+				return loaded;
 			}
 		}
 		catch (Exception ex)
@@ -291,9 +285,10 @@ internal sealed class AppConfig
 		try
 		{
 			Directory.CreateDirectory(Dir);
-			string text = FilePath + ".tmp";
-			File.WriteAllText(text, JsonSerializer.Serialize(this, Opts));
-			File.Move(text, FilePath, overwrite: true);
+			// 임시 파일에 다 쓴 뒤 바꿔치기 (쓰다가 꺼져도 설정이 반쯤 깨지지 않게)
+			string temp = FilePath + ".tmp";
+			File.WriteAllText(temp, JsonSerializer.Serialize(this, Opts));
+			File.Move(temp, FilePath, overwrite: true);
 		}
 		catch (Exception ex)
 		{

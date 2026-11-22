@@ -4,6 +4,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>기본 가방 그림 "폴더" (코드로 그린 벡터 그림).</summary>
 internal static class DefaultIcons
 {
 	private static Brush Shine => S("#40FFFFFF");

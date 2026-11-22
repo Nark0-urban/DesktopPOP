@@ -8,6 +8,7 @@ using System.Windows.Threading;
 
 namespace DesktopPop;
 
+/// <summary>바탕화면에서 끌어서 여러 개 고를 때 보이는 선택 네모 창.</summary>
 internal sealed class BandOverlay : Window
 {
 	private readonly Canvas canvas = new Canvas();
@@ -40,9 +41,10 @@ internal sealed class BandOverlay : Window
 		{
 			nint handle = new WindowInteropHelper(this).Handle;
 			Native.MakeToolWindow(handle);
-			long num = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
-			num |= 0x8080020;
-			Native.SetWindowLongPtr(handle, -20, new IntPtr(num));
+			// 클릭이 통과하고(WS_EX_TRANSPARENT) 활성화되지 않는(WS_EX_NOACTIVATE) 반투명(WS_EX_LAYERED) 창
+			long exStyle = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
+			exStyle |= 0x8080020;
+			Native.SetWindowLongPtr(handle, -20, new IntPtr(exStyle));
 		};
 	}
 
@@ -69,8 +71,8 @@ internal sealed class BandOverlay : Window
 
 	public void SetBand(Native.POINT a, Native.POINT b)
 	{
-		double num = Native.DipScale();
-		Rect rect = new Rect(new Point((double)a.X / num - Left, (double)a.Y / num - Top), new Point((double)b.X / num - Left, (double)b.Y / num - Top));
+		double scale = Native.DipScale();
+		Rect rect = new Rect(new Point((double)a.X / scale - Left, (double)a.Y / scale - Top), new Point((double)b.X / scale - Left, (double)b.Y / scale - Top));
 		Canvas.SetLeft(this.rect, rect.X);
 		Canvas.SetTop(this.rect, rect.Y);
 		this.rect.Width = rect.Width;

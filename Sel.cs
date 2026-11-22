@@ -4,6 +4,7 @@ using System.Linq;
 
 namespace DesktopPop;
 
+/// <summary>지금 선택된 아이콘들 (한 번에 한 판·가방 안에서만).</summary>
 internal static class Sel
 {
 	private static readonly List<string> keys = new List<string>();
@@ -32,19 +33,19 @@ internal static class Sel
 
 	private static void Change(ISelHost? host, IEnumerable<string> ks)
 	{
-		string[] array = ks.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-		if (array.Length == 0)
+		string[] unique = ks.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+		if (unique.Length == 0)
 		{
 			host = null;
 		}
-		if (Host != host || !keys.SequenceEqual(array, StringComparer.OrdinalIgnoreCase))
+		if (Host != host || !keys.SequenceEqual(unique, StringComparer.OrdinalIgnoreCase))
 		{
 			ISelHost host2 = Host;
 			Host = host;
 			keys.Clear();
-			keys.AddRange(array);
+			keys.AddRange(unique);
 			membership.Clear();
-			membership.UnionWith(array);
+			membership.UnionWith(unique);
 			if (host2 != null && host2 != Host)
 			{
 				host2.ApplySelection();
@@ -77,19 +78,20 @@ internal static class Sel
 		Change(h, list);
 	}
 
+	/// <summary>Shift+클릭: 마지막으로 누른 것(Anchor)부터 이것까지 한 번에 선택.</summary>
 	public static void Range(ISelHost h, string key)
 	{
 		List<string> list = h.OrderedKeys.ToList();
-		int num = list.FindIndex((string k) => Eq(k, key));
-		int num2 = ((Anchor != null) ? list.FindIndex((string k) => Eq(k, Anchor)) : (-1));
-		if (num2 < 0)
+		int clicked = list.FindIndex((string k) => Eq(k, key));
+		int anchor = ((Anchor != null) ? list.FindIndex((string k) => Eq(k, Anchor)) : (-1));
+		if (anchor < 0)
 		{
-			num2 = num;
+			anchor = clicked;
 			Anchor = key;
 		}
-		if (num >= 0)
+		if (clicked >= 0)
 		{
-			Change(h, list.Skip(Math.Min(num2, num)).Take(Math.Abs(num2 - num) + 1));
+			Change(h, list.Skip(Math.Min(anchor, clicked)).Take(Math.Abs(anchor - clicked) + 1));
 		}
 	}
 

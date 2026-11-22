@@ -6,6 +6,7 @@ namespace DesktopPop;
 [ComImport]
 [Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+/// <summary>Windows 셸 항목 COM 인터페이스 (아이콘 이름 읽기).</summary>
 internal interface IShellItem
 {
 	void BindToHandler(nint pbc, ref Guid bhid, ref Guid riid, out nint ppv);

@@ -7,6 +7,7 @@ using System.Windows;
 
 namespace DesktopPop;
 
+/// <summary>Windows API 모음과 화면·모니터·창 관련 계산 (가장자리 판정, 바탕화면이 보이는지, 전체화면 판정 등).</summary>
 internal static class Native
 {
 	public struct POINT
@@ -237,13 +238,14 @@ internal static class Native
 		}, IntPtr.Zero);
 		if (result.Count == 0)
 		{
-			nint num = MonitorFromPoint(default, 1u);
+			// 목록을 못 읽었으면 주 모니터 하나만
+			nint primary = MonitorFromPoint(default, 1u);
 			MONITORINFO mi = new MONITORINFO
 			{
 				cbSize = Marshal.SizeOf<MONITORINFO>()
 			};
-			GetMonitorInfo(num, ref mi);
-			result.Add(new MonitorInfo(num, "Primary", mi.rcMonitor, mi.rcWork, IsPrimary: true));
+			GetMonitorInfo(primary, ref mi);
+			result.Add(new MonitorInfo(primary, "Primary", mi.rcMonitor, mi.rcWork, IsPrimary: true));
 		}
 		return (from m in result
 			orderby m.IsPrimary descending, m.Bounds.Left, m.Bounds.Top
@@ -253,8 +255,8 @@ internal static class Native
 	public static MonitorInfo MonitorAt(POINT point)
 	{
 		nint handle = MonitorFromPoint(point, 2u);
-		IReadOnlyList<MonitorInfo> readOnlyList = Monitors();
-		return readOnlyList.FirstOrDefault((MonitorInfo m) => m.Handle == handle) ?? readOnlyList[0];
+		IReadOnlyList<MonitorInfo> monitors = Monitors();
+		return monitors.FirstOrDefault((MonitorInfo m) => m.Handle == handle) ?? monitors[0];
 	}
 
 	public static RECT VirtualScreenRect()
@@ -271,8 +273,8 @@ internal static class Native
 
 	public static Rect ToDipRect(RECT pixels)
 	{
-		double num = DipScale();
-		return new Rect((double)pixels.Left / num, (double)pixels.Top / num, (double)(pixels.Right - pixels.Left) / num, (double)(pixels.Bottom - pixels.Top) / num);
+		double scale = DipScale();
+		return new Rect((double)pixels.Left / scale, (double)pixels.Top / scale, (double)(pixels.Right - pixels.Left) / scale, (double)(pixels.Bottom - pixels.Top) / scale);
 	}
 
 	public static bool Contains(RECT bounds, POINT point)
@@ -304,13 +306,15 @@ internal static class Native
 		{
 			return false;
 		}
-		bool flag = IsAtMonitorEdge(cursor, bounds, side, thickness);
+		bool atEdge = IsAtMonitorEdge(cursor, bounds, side, thickness);
+		// 두 모니터가 맞닿은 경계: 마우스가 옆 모니터로 넘어가 버리므로 경계 양쪽 seamThickness 픽셀까지 가장자리로 침
 		int seam = ((side == Side.Left) ? bounds.Left : bounds.Right);
-		bool flag2 = seamThickness > 0 && cursor.X >= (long)seam - (long)seamThickness && cursor.X < (long)seam + (long)seamThickness && displays.Any((RECT other) => other.Left < other.Right && ((side == Side.Left) ? (other.Right == seam) : (other.Left == seam)) && cursor.Y >= other.Top && cursor.Y < other.Bottom && (Contains(bounds, cursor) || Contains(other, cursor)));
-		if (!flag && !flag2)
+		bool atSeam = seamThickness > 0 && cursor.X >= (long)seam - (long)seamThickness && cursor.X < (long)seam + (long)seamThickness && displays.Any((RECT other) => other.Left < other.Right && ((side == Side.Left) ? (other.Right == seam) : (other.Left == seam)) && cursor.Y >= other.Top && cursor.Y < other.Bottom && (Contains(bounds, cursor) || Contains(other, cursor)));
+		if (!atEdge && !atSeam)
 		{
 			return false;
 		}
+		// 그 가장자리에 무엇이 보이는지 확인할 점 (모니터 맨 끝 픽셀)
 		probe = new POINT
 		{
 			X = ((side == Side.Left) ? bounds.Left : (bounds.Right - 1)),
@@ -352,22 +356,23 @@ internal static class Native
 	[DllImport("user32.dll")]
 	public static extern nint GetAncestor(nint h, uint flags);
 
+	/// <summary>이 화면 위치에서 마우스가 닿는 창이 바탕화면인지.</summary>
 	public static bool IsDesktopAt(POINT p)
 	{
-		nint num = WindowFromPoint(p);
-		if (num == IntPtr.Zero)
+		nint hit = WindowFromPoint(p);
+		if (hit == IntPtr.Zero)
 		{
 			return false;
 		}
-		nint num2 = GetAncestor(num, 2u);
-		if (num2 == IntPtr.Zero)
+		nint topLevel = GetAncestor(hit, 2u);
+		if (topLevel == IntPtr.Zero)
 		{
-			num2 = num;
+			topLevel = hit;
 		}
-		StringBuilder stringBuilder = new StringBuilder(32);
-		GetClassName(num2, stringBuilder, 32);
-		string text = stringBuilder.ToString();
-		if (text == "Progman" || text == "WorkerW")
+		StringBuilder className = new StringBuilder(32);
+		GetClassName(topLevel, className, 32);
+		string name = className.ToString();
+		if (name == "Progman" || name == "WorkerW")
 		{
 			return true;
 		}
@@ -383,25 +388,30 @@ internal static class Native
 	[DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
 	private static extern int GetWindowFrame(nint hwnd, uint attribute, out RECT value, int size);
 
+	/// <summary>
+	/// 이 화면 위치에 실제 바탕화면이 보이는지 (프로그램 창이 덮고 있지 않은지).
+	/// 그 자리를 DesktopPop 창(판·가방)이 덮고 있으면 그 아래를 봐야 해서, 창 목록을 위에서부터 훑어 처음 걸리는 창으로 판단함
+	/// (50ms 동안은 목록을 다시 읽지 않고 재사용).
+	/// </summary>
 	public static bool IsDesktopExposed(POINT point)
 	{
-		nint num = WindowFromPoint(point);
-		if (num == IntPtr.Zero)
+		nint hit = WindowFromPoint(point);
+		if (hit == IntPtr.Zero)
 		{
 			return false;
 		}
-		nint num2 = GetAncestor(num, 2u);
-		if (num2 == IntPtr.Zero)
+		nint topLevel = GetAncestor(hit, 2u);
+		if (topLevel == IntPtr.Zero)
 		{
-			num2 = num;
+			topLevel = hit;
 		}
-		GetWindowThreadProcessId(num2, out var pid);
+		GetWindowThreadProcessId(topLevel, out var pid);
 		if (pid != (uint)Environment.ProcessId)
 		{
-			StringBuilder stringBuilder = new StringBuilder(64);
-			GetClassName(num2, stringBuilder, stringBuilder.Capacity);
-			string text = stringBuilder.ToString();
-			if (text == "Progman" || text == "WorkerW")
+			StringBuilder className = new StringBuilder(64);
+			GetClassName(topLevel, className, className.Capacity);
+			string name = className.ToString();
+			if (name == "Progman" || name == "WorkerW")
 			{
 				return true;
 			}
@@ -417,12 +427,12 @@ internal static class Native
 				{
 					return true;
 				}
-				GetWindowThreadProcessId(window, out var pid2);
-				if (pid2 == (uint)Environment.ProcessId)
+				GetWindowThreadProcessId(window, out var ownerPid);
+				if (ownerPid == (uint)Environment.ProcessId)
 				{
 					return true;
 				}
-				if (GetWindowCloaked(window, 14u, out var value, 4) == 0 && value != 0)
+				if (GetWindowCloaked(window, 14u, out var cloaked, 4) == 0 && cloaked != 0) // 다른 가상 데스크톱 등에 숨은 창
 				{
 					return true;
 				}
@@ -430,13 +440,13 @@ internal static class Native
 				{
 					return true;
 				}
-				StringBuilder stringBuilder2 = new StringBuilder(64);
-				GetClassName(window, stringBuilder2, stringBuilder2.Capacity);
-				string text2 = stringBuilder2.ToString();
-				bool flag = ((text2 == "Progman" || text2 == "WorkerW") ? true : false);
-				bool flag2 = flag;
+				StringBuilder windowClass = new StringBuilder(64);
+				GetClassName(window, windowClass, windowClass.Capacity);
+				string windowClassName = windowClass.ToString();
+				bool isDesktop = windowClassName == "Progman" || windowClassName == "WorkerW";
+				// 그림자를 뺀 실제 창 테두리 (DWMWA_EXTENDED_FRAME_BOUNDS), 못 읽으면 창 크기
 				RECT r = default;
-				if ((flag2 || GetWindowFrame(window, 9u, out r, Marshal.SizeOf<RECT>()) != 0 || r.Right <= r.Left || r.Bottom <= r.Top) && !GetWindowRect(window, out r))
+				if ((isDesktop || GetWindowFrame(window, 9u, out r, Marshal.SizeOf<RECT>()) != 0 || r.Right <= r.Left || r.Bottom <= r.Top) && !GetWindowRect(window, out r))
 				{
 					return true;
 				}
@@ -444,7 +454,7 @@ internal static class Native
 				{
 					return true;
 				}
-				desktopProbeWindows.Add(new DesktopProbeWindow(r, flag2));
+				desktopProbeWindows.Add(new DesktopProbeWindow(r, isDesktop));
 				return true;
 			}, IntPtr.Zero);
 			desktopProbeSnapshotAt = tickCount;
@@ -466,25 +476,26 @@ internal static class Native
 		{
 			return true;
 		}
-		StringBuilder stringBuilder = new StringBuilder(32);
-		GetClassName(foregroundWindow, stringBuilder, 32);
-		string text = stringBuilder.ToString();
-		if (text == "Progman" || text == "WorkerW")
+		StringBuilder className = new StringBuilder(32);
+		GetClassName(foregroundWindow, className, 32);
+		string name = className.ToString();
+		if (name == "Progman" || name == "WorkerW")
 		{
 			return true;
 		}
 		return false;
 	}
 
+	/// <summary>화면 픽셀 → WPF 좌표(DIP) 배율 (예: 150% 배율이면 1.5).</summary>
 	public static double DipScale()
 	{
-		RECT rECT = PrimaryMonitorRect();
-		double num = (double)(rECT.Right - rECT.Left) / SystemParameters.PrimaryScreenWidth;
-		if (!(num > 0.0))
+		RECT primary = PrimaryMonitorRect();
+		double scale = (double)(primary.Right - primary.Left) / SystemParameters.PrimaryScreenWidth;
+		if (!(scale > 0.0))
 		{
 			return 1.0;
 		}
-		return num;
+		return scale;
 	}
 
 	/// <summary>
@@ -499,12 +510,13 @@ internal static class Native
 		return (ex & WS_EX_TRANSPARENT) != 0 || ((ex & WS_EX_LAYERED) != 0 && (ex & WS_EX_NOACTIVATE) != 0);
 	}
 
+	/// <summary>작업 표시줄·Alt+Tab 에 안 나오는 창으로 (WS_EX_TOOLWINDOW 켜고 WS_EX_APPWINDOW 끔).</summary>
 	public static void MakeToolWindow(nint hwnd)
 	{
-		long num = ((IntPtr)GetWindowLongPtr(hwnd, -20)).ToInt64();
-		num |= 0x80;
-		num &= -262145;
-		SetWindowLongPtr(hwnd, -20, new IntPtr(num));
+		long exStyle = ((IntPtr)GetWindowLongPtr(hwnd, -20)).ToInt64();
+		exStyle |= 0x80;
+		exStyle &= -262145;
+		SetWindowLongPtr(hwnd, -20, new IntPtr(exStyle));
 	}
 
 	public static void SetTopmost(nint hwnd)
@@ -524,23 +536,23 @@ internal static class Native
 	public static bool TryGetTaskbarRect(out RECT r)
 	{
 		r = default;
-		nint num = FindWindow("Shell_TrayWnd", null);
-		if (num != IntPtr.Zero && IsWindowVisible(num))
+		nint taskbar = FindWindow("Shell_TrayWnd", null);
+		if (taskbar != IntPtr.Zero && IsWindowVisible(taskbar))
 		{
-			return GetWindowRect(num, out r);
+			return GetWindowRect(taskbar, out r);
 		}
 		return false;
 	}
 
 	public static bool TryGetTaskbarRect(MonitorInfo monitor, out RECT r)
 	{
-		string[] array = new string[2] { "Shell_TrayWnd", "Shell_SecondaryTrayWnd" };
-		foreach (string cls in array)
+		// 주 모니터 작업 표시줄 + 보조 모니터 작업 표시줄들 중 이 모니터에 있는 것
+		foreach (string cls in new string[2] { "Shell_TrayWnd", "Shell_SecondaryTrayWnd" })
 		{
-			nint num = IntPtr.Zero;
-			while ((num = FindWindowEx(IntPtr.Zero, num, cls, null)) != IntPtr.Zero)
+			nint taskbar = IntPtr.Zero;
+			while ((taskbar = FindWindowEx(IntPtr.Zero, taskbar, cls, null)) != IntPtr.Zero)
 			{
-				if (IsWindowVisible(num) && MonitorFromWindow(num, 2u) == monitor.Handle && GetWindowRect(num, out r))
+				if (IsWindowVisible(taskbar) && MonitorFromWindow(taskbar, 2u) == monitor.Handle && GetWindowRect(taskbar, out r))
 				{
 					return true;
 				}
@@ -552,88 +564,61 @@ internal static class Native
 
 	public static bool InTaskbar(POINT p)
 	{
-		nint num = WindowFromPoint(p);
-		if (num == IntPtr.Zero)
+		nint hit = WindowFromPoint(p);
+		if (hit == IntPtr.Zero)
 		{
 			return false;
 		}
-		nint ancestor = GetAncestor(num, 2u);
-		StringBuilder stringBuilder = new StringBuilder(64);
-		GetClassName((ancestor == IntPtr.Zero) ? num : ancestor, stringBuilder, stringBuilder.Capacity);
-		string text = stringBuilder.ToString();
-		if (text == "Shell_TrayWnd" || text == "Shell_SecondaryTrayWnd")
+		nint ancestor = GetAncestor(hit, 2u);
+		StringBuilder className = new StringBuilder(64);
+		GetClassName((ancestor == IntPtr.Zero) ? hit : ancestor, className, className.Capacity);
+		string name = className.ToString();
+		if (name == "Shell_TrayWnd" || name == "Shell_SecondaryTrayWnd")
 		{
 			return true;
 		}
 		return false;
 	}
 
-	public static bool ShouldBlock(RECT mon, bool blockFullscreen, bool blockMaximized)
+	/// <summary>
+	/// 이 모니터에서 게임·영상 같은 전체화면 프로그램이 앞에 있는지 (그때는 새 파일 알림으로 가장자리를 열지 않음).
+	/// 바탕화면·작업 표시줄·DesktopPop 자신이 앞에 있으면 아님.
+	/// </summary>
+	public static bool IsFullscreenAppOn(RECT mon)
 	{
-		bool flag = blockFullscreen && SHQueryUserNotificationState(out var state) == 0 && (state == 2 || state == 3 || state == 4);
-		nint foregroundWindow = GetForegroundWindow();
-		if (foregroundWindow == IntPtr.Zero)
+		nint foreground = GetForegroundWindow();
+		if (foreground == IntPtr.Zero)
 		{
 			return false;
 		}
-		StringBuilder stringBuilder = new StringBuilder(64);
-		GetClassName(foregroundWindow, stringBuilder, 64);
-		bool flag2;
-		switch (stringBuilder.ToString())
-		{
-		case "Progman":
-		case "WorkerW":
-		case "Shell_TrayWnd":
-		case "Shell_SecondaryTrayWnd":
-			flag2 = true;
-			break;
-		default:
-			flag2 = false;
-			break;
-		}
-		if (flag2)
+		StringBuilder className = new StringBuilder(64);
+		GetClassName(foreground, className, 64);
+		if (className.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
 		{
 			return false;
 		}
-		GetWindowThreadProcessId(foregroundWindow, out var pid);
-		if (pid == (uint)Environment.ProcessId)
-		{
-			return false;
-		}
-		if (!GetWindowRect(foregroundWindow, out var r))
+		GetWindowThreadProcessId(foreground, out var pid);
+		if (pid == (uint)Environment.ProcessId || !GetWindowRect(foreground, out var r))
 		{
 			return false;
 		}
 		if (r.Left >= mon.Right || r.Right <= mon.Left || r.Top >= mon.Bottom || r.Bottom <= mon.Top)
 		{
+			return false; // 다른 모니터에 있는 창
+		}
+		if (r.Left <= mon.Left && r.Top <= mon.Top && r.Right >= mon.Right && r.Bottom >= mon.Bottom)
+		{
+			return true; // 모니터를 꽉 채움
+		}
+		// Windows 가 "전체화면 앱 실행 중 / 발표 중"이라고 할 때는 모니터의 90% 이상만 덮어도 전체화면으로 침
+		bool windowsSaysFullscreen = SHQueryUserNotificationState(out var state) == 0 && state is 2 or 3 or 4;
+		if (!windowsSaysFullscreen)
+		{
 			return false;
 		}
-		if (blockFullscreen)
-		{
-			if (r.Left <= mon.Left && r.Top <= mon.Top && r.Right >= mon.Right && r.Bottom >= mon.Bottom)
-			{
-				return true;
-			}
-			if (flag)
-			{
-				long num = (long)(mon.Right - mon.Left) * (long)(mon.Bottom - mon.Top);
-				long num2 = Math.Max(0, Math.Min(r.Right, mon.Right) - Math.Max(r.Left, mon.Left));
-				long num3 = Math.Max(0, Math.Min(r.Bottom, mon.Bottom) - Math.Max(r.Top, mon.Top));
-				if (num > 0 && num2 * num3 >= num * 9 / 10)
-				{
-					return true;
-				}
-			}
-		}
-		nint num4 = MonitorFromPoint(new POINT
-		{
-			X = mon.Left + (mon.Right - mon.Left) / 2,
-			Y = mon.Top + (mon.Bottom - mon.Top) / 2
-		}, 2u);
-		if (blockMaximized && MonitorFromWindow(foregroundWindow, 2u) == num4)
-		{
-			return IsZoomed(foregroundWindow);
-		}
-		return false;
+		long monitorArea = (long)(mon.Right - mon.Left) * (mon.Bottom - mon.Top);
+		long overlapWidth = Math.Max(0, Math.Min(r.Right, mon.Right) - Math.Max(r.Left, mon.Left));
+		long overlapHeight = Math.Max(0, Math.Min(r.Bottom, mon.Bottom) - Math.Max(r.Top, mon.Top));
+		return monitorArea > 0 && overlapWidth * overlapHeight >= monitorArea * 9 / 10;
 	}
 }

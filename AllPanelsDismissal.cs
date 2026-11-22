@@ -2,6 +2,7 @@ using System;
 
 namespace DesktopPop;
 
+/// <summary>"모두 펼치기" 상태를 언제 접을지 판단: 바깥 클릭·다른 프로그램에서 키 입력·다른 창으로 옮겨 감.</summary>
 internal sealed class AllPanelsDismissal
 {
 	private nint lastForeground;
@@ -54,9 +55,9 @@ internal sealed class AllPanelsDismissal
 			}
 			return false;
 		}
-		bool flag = foreground != lastForeground;
-		lastForeground = foreground;
-		if (flag)
+		bool foregroundChanged = foreground != lastForeground;
+		lastForeground = foreground;
+		if (foregroundChanged)
 		{
 			return !isOurWindow;
 		}

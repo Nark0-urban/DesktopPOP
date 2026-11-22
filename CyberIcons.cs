@@ -4,6 +4,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>기본 가방 그림 중 "사이버" 6종 (코드로 그린 벡터 그림).</summary>
 internal static class CyberIcons
 {
 	private const string Cyan = "#55F4FF";

@@ -5,6 +5,7 @@ using System.Windows.Input;
 
 namespace DesktopPop;
 
+/// <summary>판·가방 안에서 빈 곳을 끌어 여러 개 고르는 선택 네모.</summary>
 internal sealed class RubberBand
 {
 	public Action? OnClick;

@@ -8,6 +8,7 @@ using System.Windows.Media.Effects;
 
 namespace DesktopPop;
 
+/// <summary>새로 생긴 아이콘이 마우스 자리에서 판의 제자리로 날아가는 연출 창.</summary>
 internal sealed class FlyOverlay : Window
 {
 	private static FlyOverlay? inst;
@@ -48,9 +49,10 @@ internal sealed class FlyOverlay : Window
 		{
 			nint handle = new WindowInteropHelper(this).Handle;
 			Native.MakeToolWindow(handle);
-			long num = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
-			num |= 0x8080020;
-			Native.SetWindowLongPtr(handle, -20, new IntPtr(num));
+			// 클릭이 통과하고(WS_EX_TRANSPARENT) 활성화되지 않는(WS_EX_NOACTIVATE) 반투명(WS_EX_LAYERED) 창
+			long exStyle = ((IntPtr)Native.GetWindowLongPtr(handle, -20)).ToInt64();
+			exStyle |= 0x8080020;
+			Native.SetWindowLongPtr(handle, -20, new IntPtr(exStyle));
 		};
 	}
 

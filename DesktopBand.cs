@@ -8,6 +8,7 @@ using System.Windows.Threading;
 
 namespace DesktopPop;
 
+/// <summary>빈 바탕화면에서 마우스로 끌어 판·가방 아이콘을 여러 개 고르는 선택 네모 (마우스 감시 훅).</summary>
 internal static class DesktopBand
 {
 	private readonly record struct Snap(Native.POINT A, Native.POINT B, ISelHost? BaseHost, List<string> BaseKeys);
@@ -140,9 +141,9 @@ internal static class DesktopBand
 			Snap? snap = finishSnap;
 			if (snap.HasValue)
 			{
-				Snap valueOrDefault = snap.GetValueOrDefault();
-				finishSnap = null;
-				ApplySelection(valueOrDefault);
+				Snap current = snap.GetValueOrDefault();
+				finishSnap = null;
+				ApplySelection(current);
 			}
 			if (down && active)
 			{
@@ -181,7 +182,7 @@ internal static class DesktopBand
 			{
 				continue;
 			}
-			List<string> list2 = host.OrderedKeys.Where((string k) =>
+			List<string> inThisHost = host.OrderedKeys.Where((string k) =>
 			{
 				Border border = host.TileOf(k);
 				if (border != null)
@@ -194,10 +195,10 @@ internal static class DesktopBand
 				}
 				return false;
 			}).ToList();
-			if (list2.Count > list.Count)
+			if (inThisHost.Count > list.Count)
 			{
-				selHost = host;
-				list = list2;
+				selHost = host;
+				list = inThisHost;
 			}
 		}
 		if (selHost != null)
@@ -289,13 +290,13 @@ internal static class DesktopBand
 				{
 				case 513:
 				{
-					Native.POINT pOINT = Marshal.PtrToStructure<Native.POINT>(lParam);
+					Native.POINT cursor = Marshal.PtrToStructure<Native.POINT>(lParam); // MSLLHOOKSTRUCT 맨 앞이 화면 좌표
 					App instance = App.Instance;
-					bool flag = instance.ObserveGlobalPointerInput(pOINT);
+					bool dismissed = instance.ObserveGlobalPointerInput(cursor);
 					buttonDown = true;
-					if (!flag && !down && instance.SelHosts().Any((ISelHost h) => h.BandSelectable) && Native.IsDesktopAt(pOINT))
+					if (!dismissed && !down && instance.SelHosts().Any((ISelHost h) => h.BandSelectable) && Native.IsDesktopAt(cursor))
 					{
-						Start(pOINT, AddKeys(), () =>
+						Start(cursor, AddKeys(), () =>
 						{
 							Sel.Clear();
 						});

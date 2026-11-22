@@ -1,5 +1,6 @@
 namespace DesktopPop;
 
+/// <summary>모두 펼쳤다가 접을 때 하던 프로그램 창으로 돌아갈지 기억.</summary>
 internal sealed class PanelWorkReturn
 {
 	private ForegroundSnapshot lastWork;
@@ -27,9 +28,10 @@ internal sealed class PanelWorkReturn
 	public PanelClosePlan Close(ForegroundSnapshot foreground, bool explicitClose)
 	{
 		ForegroundKind kind = foreground.Kind;
-		bool flag = ((kind == ForegroundKind.None || (uint)(kind - 3) <= 1u) ? true : false);
-		bool flag2 = flag || foreground == openedOver;
-		ForegroundSnapshot restore = ((explicitClose & flag2) ? openedOver : default(ForegroundSnapshot));
+		// 단축키·버튼으로 직접 접었고, 그 사이 다른 창으로 옮겨 가지 않았으면(또는 앞 창이 없거나 DesktopPop·작업 표시줄이면) 하던 창으로 돌아감
+		bool nothingElseChosen = kind == ForegroundKind.None || (uint)(kind - 3) <= 1u;
+		bool stillOnSameWork = nothingElseChosen || foreground == openedOver;
+		ForegroundSnapshot restore = ((explicitClose & stillOnSameWork) ? openedOver : default(ForegroundSnapshot));
 		ForegroundSnapshot placeBehind;
 		if (foreground.Kind == ForegroundKind.Work)
 		{

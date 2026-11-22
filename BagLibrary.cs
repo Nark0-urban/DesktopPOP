@@ -11,6 +11,7 @@ using System.Windows.Media.Imaging;
 
 namespace DesktopPop;
 
+/// <summary>가방 그림 보관함(data\library): 기본 그림 넣기, 그림 추가·복사, 목록 순서.</summary>
 internal static class BagLibrary
 {
 	private static readonly string[] Exts = new string[9] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff" };
@@ -33,14 +34,15 @@ internal static class BagLibrary
 		string path = Path.Combine(AppConfig.Dir, "images");
 		if (Directory.Exists(path))
 		{
-			int num = 1;
-			HashSet<string> hashSet = new HashSet<string>();
-			foreach (string item2 in Directory.GetFiles(path).Where(IsImage).OrderBy(File.GetCreationTimeUtc))
+			// 가방들이 이미 쓰던 그림도 보관함에 "내 그림 N" 으로 넣어 둠 (똑같은 그림은 한 번만)
+			int n = 1;
+			HashSet<string> seenHashes = new HashSet<string>();
+			foreach (string image in Directory.GetFiles(path).Where(IsImage).OrderBy(File.GetCreationTimeUtc))
 			{
-				string item = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(item2)));
-				if (hashSet.Add(item))
+				string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(image)));
+				if (seenHashes.Add(hash))
 				{
-					CopyUnique(item2, $"내 그림 {num++}");
+					CopyUnique(image, $"내 그림 {n++}");
 				}
 			}
 		}
@@ -55,26 +57,24 @@ internal static class BagLibrary
 			return;
 		}
 		Directory.CreateDirectory(Dir);
-		bool flag = true;
-		foreach (var item3 in CyberIcons.All().Concat(SteampunkIcons.All()))
+		bool allWritten = true;
+		foreach (var (name, drawing) in CyberIcons.All().Concat(SteampunkIcons.All()))
 		{
-			string item = item3.name;
-			Drawing item2 = item3.drawing;
-			string path = Path.Combine(Dir, item + ".png");
+			string path = Path.Combine(Dir, name + ".png");
 			if (!File.Exists(path))
 			{
 				try
 				{
-					RenderPng(item2, path);
+					RenderPng(drawing, path);
 				}
 				catch (Exception ex)
 				{
-					flag = false;
+					allWritten = false;
 					App.Log(ex);
 				}
 			}
 		}
-		if (flag)
+		if (allWritten)
 		{
 			cfg.CyberLibrarySeeded = true;
 			cfg.Save();
@@ -173,16 +173,14 @@ internal static class BagLibrary
 	private static void WriteDrawn(bool overwrite)
 	{
 		Directory.CreateDirectory(Dir);
-		foreach (var item3 in DefaultIcons.All().Concat(CyberIcons.All()).Concat(SteampunkIcons.All()))
+		foreach (var (name, drawing) in DefaultIcons.All().Concat(CyberIcons.All()).Concat(SteampunkIcons.All()))
 		{
-			string item = item3.name;
-			Drawing item2 = item3.drawing;
-			string path = Path.Combine(Dir, item + ".png");
+			string path = Path.Combine(Dir, name + ".png");
 			if (overwrite || !File.Exists(path))
 			{
 				try
 				{
-					RenderPng(item2, path);
+					RenderPng(drawing, path);
 				}
 				catch (Exception ex)
 				{
@@ -230,25 +228,26 @@ internal static class BagLibrary
 	private static string CopyUnique(string src, string baseName)
 	{
 		string extension = Path.GetExtension(src);
-		string text = Path.Combine(Dir, baseName + extension);
-		int num = 2;
-		while (File.Exists(text))
+		string dest = Path.Combine(Dir, baseName + extension);
+		int n = 2;
+		while (File.Exists(dest))
 		{
-			text = Path.Combine(Dir, $"{baseName} ({num}){extension}");
-			num++;
+			dest = Path.Combine(Dir, $"{baseName} ({n}){extension}");
+			n++;
 		}
-		File.Copy(src, text);
-		File.SetCreationTimeUtc(text, DateTime.UtcNow);
-		return text;
+		File.Copy(src, dest);
+		File.SetCreationTimeUtc(dest, DateTime.UtcNow); // 추가한 순서대로 뒤에 붙게
+		return dest;
 	}
 
 	public static string UseForBag(string libraryPath)
 	{
-		string text = Path.Combine(AppConfig.Dir, "images");
-		Directory.CreateDirectory(text);
-		string text2 = Path.Combine(text, Guid.NewGuid().ToString("N") + Path.GetExtension(libraryPath));
-		File.Copy(libraryPath, text2);
-		return text2;
+		// 가방이 쓸 그림은 따로 복사해 둠 (보관함에서 지워도 가방 그림은 그대로 남게)
+		string images = Path.Combine(AppConfig.Dir, "images");
+		Directory.CreateDirectory(images);
+		string copy = Path.Combine(images, Guid.NewGuid().ToString("N") + Path.GetExtension(libraryPath));
+		File.Copy(libraryPath, copy);
+		return copy;
 	}
 
 	private static void RenderPng(Drawing drawing, string path)

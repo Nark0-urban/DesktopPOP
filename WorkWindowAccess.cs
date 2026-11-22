@@ -5,6 +5,7 @@ using System.Text;
 
 namespace DesktopPop;
 
+/// <summary>맨 앞 창 알아내기, 접을 때 하던 창으로 돌아가기, 가방을 프로그램 창들 뒤로 내리기.</summary>
 internal static class WorkWindowAccess
 {
 	[DllImport("user32.dll")]
@@ -53,10 +54,10 @@ internal static class WorkWindowAccess
 		{
 			return new ForegroundSnapshot(window, pid, ForegroundKind.Own);
 		}
-		StringBuilder stringBuilder = new StringBuilder(128);
-		Native.GetClassName(window, stringBuilder, stringBuilder.Capacity);
+		StringBuilder className = new StringBuilder(128);
+		Native.GetClassName(window, className, className.Capacity);
 		ForegroundKind foregroundKind;
-		switch (stringBuilder.ToString())
+		switch (className.ToString())
 		{
 		case "Progman":
 		case "WorkerW":
@@ -138,31 +139,32 @@ internal static class WorkWindowAccess
 	internal static IReadOnlyList<WorkStackEntry> ReadStack()
 	{
 		List<WorkStackEntry> list = new List<WorkStackEntry>();
-		HashSet<nint> hashSet = new HashSet<nint>();
-		nint num = GetTopWindow(IntPtr.Zero);
-		int num2 = 0;
-		while (num != IntPtr.Zero && num2 < 4096 && hashSet.Add(num))
+		// 맨 위 창부터 아래로 (GW_HWNDNEXT), 같은 창이 다시 나오거나 4096 개를 넘으면 멈춤
+		HashSet<nint> seen = new HashSet<nint>();
+		nint current = GetTopWindow(IntPtr.Zero);
+		int count = 0;
+		while (current != IntPtr.Zero && count < 4096 && seen.Add(current))
 		{
-			nint window = GetWindow(num, 2u);
-			if (Native.IsWindowVisible(num) && !IsIconic(num) && !IsCloaked(num) && !Native.IsOverlayWindow(num))
+			nint next = GetWindow(current, 2u);
+			if (Native.IsWindowVisible(current) && !IsIconic(current) && !IsCloaked(current) && !Native.IsOverlayWindow(current))
 			{
-				ForegroundSnapshot window2 = Describe(num);
-				ForegroundKind kind = window2.Kind;
+				ForegroundSnapshot described = Describe(current);
+				ForegroundKind kind = described.Kind;
 				if ((uint)(kind - 1) <= 1u)
 				{
 					Native.RECT r = default;
-					if (window2.Kind == ForegroundKind.Desktop || GetWindowFrame(num, 9u, out r, Marshal.SizeOf<Native.RECT>()) != 0 || r.Right <= r.Left || r.Bottom <= r.Top)
+					if (described.Kind == ForegroundKind.Desktop || GetWindowFrame(current, 9u, out r, Marshal.SizeOf<Native.RECT>()) != 0 || r.Right <= r.Left || r.Bottom <= r.Top)
 					{
-						Native.GetWindowRect(num, out r);
+						Native.GetWindowRect(current, out r);
 					}
 					if (r.Right > r.Left && r.Bottom > r.Top)
 					{
-						list.Add(new WorkStackEntry(window2, r, (((IntPtr)Native.GetWindowLongPtr(num, -20)).ToInt64() & 8) != 0));
+						list.Add(new WorkStackEntry(described, r, (((IntPtr)Native.GetWindowLongPtr(current, -20)).ToInt64() & 8) != 0));
 					}
 				}
 			}
-			num = window;
-			num2++;
+			current = next;
+			count++;
 		}
 		return list;
 	}

@@ -8,6 +8,7 @@ using System.Windows.Media;
 
 namespace DesktopPop;
 
+/// <summary>작업 표시줄 오른쪽 아래(시계 옆) 아이콘과 설정 메뉴.</summary>
 internal sealed class Tray : IDisposable
 {
 	private readonly NotifyIcon icon;
@@ -26,22 +27,12 @@ internal sealed class Tray : IDisposable
 				})
 			} }
 		};
-		ToolStripMenuItem button = new ToolStripMenuItem("떠 있는 패널 버튼 표시")
-		{
-			Checked = app.Config.ShowPanelButton,
-			CheckOnClick = true
-		};
-		button.Click += (object? s, EventArgs e) =>
-		{
-			app.SetPanelButtonVisible(button.Checked);
-		};
-		contextMenuStrip.Items.Add(button);
 		ToolStripMenuItem toggleItem = (ToolStripMenuItem)contextMenuStrip.Items[0];
 		ToolStripMenuItem hotkey = BuildHotkeyMenu(app);
 		contextMenuStrip.Items.Add(hotkey);
 		contextMenuStrip.Opening += (object? s, CancelEventArgs e) =>
 		{
-			button.Checked = app.Config.ShowPanelButton;
+			RefreshChecks();
 			toggleItem.ShortcutKeyDisplayString = GlobalHotkey.IsRegistered ? app.Config.ToggleHotkey : null;
 			foreach (ToolStripItem it in hotkey.DropDownItems)
 			{
@@ -88,18 +79,15 @@ internal sealed class Tray : IDisposable
 			Enabled = false
 		});
 		ToolStripMenuItem speed = new ToolStripMenuItem("튀어나오는 반응 속도");
-		(string, int)[] array = new (string, int)[3]
+		(string, int)[] speeds = new (string, int)[3]
 		{
 			("바로", 0),
 			("보통", 150),
 			("느긋하게", 400)
 		};
-		for (int num = 0; num < array.Length; num++)
+		foreach (var (speedName, ms) in speeds)
 		{
-			(string, int) tuple = array[num];
-			string item = tuple.Item1;
-			int ms = tuple.Item2;
-			ToolStripMenuItem m = new ToolStripMenuItem(item)
+			ToolStripMenuItem m = new ToolStripMenuItem(speedName)
 			{
 				Checked = (app.Config.EdgeDelayMs == ms)
 			};
@@ -127,6 +115,27 @@ internal sealed class Tray : IDisposable
 			app.Config.Save();
 		};
 		contextMenuStrip.Items.Add(single);
+		ToolStripMenuItem winMenu = new ToolStripMenuItem("우클릭에 Windows 메뉴 쓰기 (압축·보내기 등)")
+		{
+			Checked = app.Config.UseWindowsMenu,
+			CheckOnClick = true,
+			ToolTipText = "끄면 DesktopPop 간단 메뉴가 떠요. 특정 프로그램의 메뉴 때문에 멈추거나 느리면 꺼 보세요."
+		};
+		winMenu.Click += (object? s, EventArgs e) =>
+		{
+			app.Config.UseWindowsMenu = winMenu.Checked;
+			app.Config.Save();
+			if (winMenu.Checked)
+			{
+				NativeShellMenu.Prewarm();
+			}
+			else
+			{
+				NativeShellMenu.DropStandby();
+			}
+		};
+		contextMenuStrip.Items.Add(winMenu);
+		refreshWinMenu = () => winMenu.Checked = app.Config.UseWindowsMenu;
 		ToolStripMenuItem splash = new ToolStripMenuItem("켤 때 시작 애니메이션 보이기")
 		{
 			Checked = app.Config.ShowStartupAnimation,
@@ -169,6 +178,14 @@ internal sealed class Tray : IDisposable
 			Visible = true,
 			ContextMenuStrip = contextMenuStrip
 		};
+	}
+
+	private Action? refreshWinMenu;
+
+	/// <summary>설정이 메뉴 밖에서 바뀌었을 때 체크 표시를 맞춤.</summary>
+	public void RefreshChecks()
+	{
+		refreshWinMenu?.Invoke();
 	}
 
 	public void Balloon(string title, string text)
@@ -241,11 +258,8 @@ internal sealed class Tray : IDisposable
 		(string, string, string)[] presets = Theme.Presets;
 		for (int i = 0; i < presets.Length; i++)
 		{
-			(string, string, string) tuple = presets[i];
-			string item = tuple.Item1;
-			string accent = tuple.Item2;
-			string panel = tuple.Item3;
-			ToolStripMenuItem toolStripMenuItem = new ToolStripMenuItem(item, Swatch(accent, panel))
+			var (presetName, accent, panel) = presets[i];
+			ToolStripMenuItem toolStripMenuItem = new ToolStripMenuItem(presetName, Swatch(accent, panel))
 			{
 				Tag = (accent, panel)
 			};
@@ -258,18 +272,18 @@ internal sealed class Tray : IDisposable
 		root.DropDownItems.Add(new ToolStripSeparator());
 		root.DropDownItems.Add("강조색 직접 고르기... (반짝임·고리·배지)", null, (object? s, EventArgs e) =>
 		{
-			string text = PickColor(Theme.Accent);
-			if (text != null)
+			string? picked = PickColor(Theme.Accent);
+			if (picked != null)
 			{
-				Set(text, app.Config.PanelColor ?? "#1A1026");
+				Set(picked, app.Config.PanelColor ?? "#1A1026");
 			}
 		});
 		root.DropDownItems.Add("판 배경색 직접 고르기... (가장자리·가방 뒤)", null, (object? s, EventArgs e) =>
 		{
-			string text = PickColor(Theme.Panel);
-			if (text != null)
+			string? picked = PickColor(Theme.Panel);
+			if (picked != null)
 			{
-				Set(app.Config.AccentColor ?? "#FF6EB4", text);
+				Set(app.Config.AccentColor ?? "#FF6EB4", picked);
 			}
 		});
 		RefreshChecks();

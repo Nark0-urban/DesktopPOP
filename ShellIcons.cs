@@ -8,6 +8,7 @@ using System.Windows.Media.Imaging;
 
 namespace DesktopPop;
 
+/// <summary>Windows 가 쓰는 아이콘 그림과 이름 읽기 (뒤에서 하나씩).</summary>
 internal static class ShellIcons
 {
 	private static readonly Lazy<BlockingCollection<Action>> backgroundWork = new Lazy<BlockingCollection<Action>>(() =>
@@ -89,7 +90,7 @@ internal static class ShellIcons
 			catch
 			{
 			}
-			BitmapSource item2 = null;
+			BitmapSource icon = null;
 			if (item is IShellItemImageFactory shellItemImageFactory && shellItemImageFactory.GetImage(new Native.SIZE
 			{
 				cx = px,
@@ -98,14 +99,14 @@ internal static class ShellIcons
 			{
 				try
 				{
-					item2 = FromHBitmap(phbm);
+					icon = FromHBitmap(phbm);
 				}
 				finally
 				{
 					Native.DeleteObject(phbm);
 				}
 			}
-			return (name: ppszName, icon: item2);
+			return (name: ppszName, icon: icon);
 		}
 		catch
 		{
@@ -124,8 +125,8 @@ internal static class ShellIcons
 	{
 		Native.GetObject(hbmp, Marshal.SizeOf<Native.BITMAP>(), out var bm);
 		int bmWidth = bm.bmWidth;
-		int num = Math.Abs(bm.bmHeight);
-		if (bmWidth <= 0 || num <= 0)
+		int height = Math.Abs(bm.bmHeight);
+		if (bmWidth <= 0 || height <= 0)
 		{
 			return null;
 		}
@@ -133,15 +134,15 @@ internal static class ShellIcons
 		{
 			biSize = 40,
 			biWidth = bmWidth,
-			biHeight = -num,
+			biHeight = -height, // 음수 = 위에서 아래로
 			biPlanes = 1,
 			biBitCount = 32
 		};
-		byte[] array = new byte[bmWidth * num * 4];
+		byte[] pixels = new byte[bmWidth * height * 4];
 		nint dC = Native.GetDC(IntPtr.Zero);
 		try
 		{
-			if (Native.GetDIBits(dC, hbmp, 0u, (uint)num, array, ref bi, 0u) == 0)
+			if (Native.GetDIBits(dC, hbmp, 0u, (uint)height, pixels, ref bi, 0u) == 0)
 			{
 				return null;
 			}
@@ -150,23 +151,24 @@ internal static class ShellIcons
 		{
 			Native.ReleaseDC(IntPtr.Zero, dC);
 		}
-		bool flag = false;
-		for (int i = 3; i < array.Length; i += 4)
+		// 투명도 정보가 하나도 없는(전부 0) 그림은 완전히 불투명한 그림으로 취급
+		bool hasAlpha = false;
+		for (int i = 3; i < pixels.Length; i += 4)
 		{
-			if (array[i] != 0)
+			if (pixels[i] != 0)
 			{
-				flag = true;
+				hasAlpha = true;
 				break;
 			}
 		}
-		if (!flag)
+		if (!hasAlpha)
 		{
-			for (int j = 3; j < array.Length; j += 4)
+			for (int j = 3; j < pixels.Length; j += 4)
 			{
-				array[j] = byte.MaxValue;
+				pixels[j] = byte.MaxValue;
 			}
 		}
-		BitmapSource bitmapSource = BitmapSource.Create(bmWidth, num, 96.0, 96.0, flag ? PixelFormats.Pbgra32 : PixelFormats.Bgra32, null, array, bmWidth * 4);
+		BitmapSource bitmapSource = BitmapSource.Create(bmWidth, height, 96.0, 96.0, hasAlpha ? PixelFormats.Pbgra32 : PixelFormats.Bgra32, null, pixels, bmWidth * 4);
 		bitmapSource.Freeze();
 		return bitmapSource;
 	}

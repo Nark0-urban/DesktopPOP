@@ -4,6 +4,7 @@ using Microsoft.Win32;
 
 namespace DesktopPop;
 
+/// <summary>"윈도우 켤 때 자동 실행" (HKCU Run 레지스트리 값).</summary>
 internal static class AutoStart
 {
 	private const string RunKey = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";

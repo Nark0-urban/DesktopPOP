@@ -10,6 +10,7 @@ using System.Windows.Threading;
 
 namespace DesktopPop;
 
+/// <summary>아이콘 칸 만들기와 마우스 동작(선택·열기·끌기·우클릭).</summary>
 internal static class Tiles
 {
 	public const string DragFormat = "DesktopPop.ItemKey";
@@ -32,11 +33,11 @@ internal static class Tiles
 
 	public static string[]? KeysFrom(IDataObject data)
 	{
-		if (!(data.GetData("DesktopPop.ItemKey") is string text))
+		if (!(data.GetData("DesktopPop.ItemKey") is string joined))
 		{
 			return null;
 		}
-		return text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+		return joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 	}
 
 	public static Border Create(DesktopItem item, bool backdrop)
@@ -50,7 +51,7 @@ internal static class Tiles
 			HorizontalAlignment = HorizontalAlignment.Center
 		};
 		RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
-		TextBlock element = new TextBlock
+		TextBlock caption = new TextBlock
 		{
 			Text = item.DisplayLabel,
 			Foreground = Brushes.White,
@@ -69,34 +70,35 @@ internal static class Tiles
 			}
 		};
 		ScaleTransform scale = new ScaleTransform(1.0, 1.0);
-		StackPanel stackPanel = new StackPanel
+		StackPanel content = new StackPanel
 		{
 			RenderTransformOrigin = new Point(0.5, 0.5),
 			RenderTransform = scale
 		};
-		stackPanel.Children.Add(image);
-		stackPanel.Children.Add(element);
-		Brush brush = (backdrop ? Theme.Brush(Theme.Backdrop, 128) : IdleBg);
+		content.Children.Add(image);
+		content.Children.Add(caption);
+		// 가방 둘레에 펼친 아이콘은 뒤가 비치지 않게 반투명 바탕, 가장자리 판 아이콘은 거의 투명(그래도 클릭은 되게)
+		Brush idleBackground = (backdrop ? Theme.Brush(Theme.Backdrop, 128) : IdleBg);
 		Border border = new Border
 		{
 			Width = 80.0,
 			Height = 92.0,
 			CornerRadius = new CornerRadius(12.0),
-			Background = brush,
+			Background = idleBackground,
 			BorderThickness = new Thickness(1.0),
 			BorderBrush = Brushes.Transparent,
-			Child = stackPanel,
+			Child = content,
 			Cursor = Cursors.Hand,
 			ToolTip = item.ToolTipText,
 			Tag = item,
 			CacheMode = new BitmapCache()
 		};
-		border.Resources["idle"] = brush;
+		border.Resources["idle"] = idleBackground;
 		border.MouseEnter += (object s, MouseEventArgs e) =>
 		{
-			bool flag = IsSelected(border);
-			border.Background = (flag ? Theme.Brush(Theme.Accent, 102) : HoverBg);
-			border.BorderBrush = (flag ? Theme.Brush(Theme.Accent) : HoverBorder);
+			bool selected = IsSelected(border);
+			border.Background = (selected ? Theme.Brush(Theme.Accent, 102) : HoverBg);
+			border.BorderBrush = (selected ? Theme.Brush(Theme.Accent) : HoverBorder);
 			scale.BeginAnimation(ScaleTransform.ScaleXProperty, Anim.To(1.08, 120.0));
 			scale.BeginAnimation(ScaleTransform.ScaleYProperty, Anim.To(1.08, 120.0));
 		};
@@ -111,12 +113,7 @@ internal static class Tiles
 
 	private static bool IsSelected(Border tile)
 	{
-		object obj = tile.Resources["sel"];
-		if (obj is bool)
-		{
-			return (bool)obj;
-		}
-		return false;
+		return tile.Resources["sel"] is bool selected && selected;
 	}
 
 	public static void SetSelected(Border tile, bool selected)
@@ -133,11 +130,15 @@ internal static class Tiles
 
 	private static void ApplyRest(Border tile)
 	{
-		bool flag = IsSelected(tile);
-		tile.Background = (flag ? Theme.Brush(Theme.Accent, 69) : (tile.Resources["idle"] as Brush));
-		tile.BorderBrush = (flag ? Theme.Brush(Theme.Accent, 204) : Brushes.Transparent);
+		bool selected = IsSelected(tile);
+		tile.Background = (selected ? Theme.Brush(Theme.Accent, 69) : (tile.Resources["idle"] as Brush));
+		tile.BorderBrush = (selected ? Theme.Brush(Theme.Accent, 204) : Brushes.Transparent);
 	}
 
+	/// <summary>
+	/// 아이콘 칸에 원래 바탕화면 같은 마우스 동작을 붙임: 클릭 = 선택(Ctrl·Shift 로 여러 개), 두 번 클릭 = 열기,
+	/// 끌기 = 옮기기, 우클릭 = 메뉴. isOutside/dropOutside 는 가방에서 원 밖으로 끌어내 꺼낼 때 씀.
+	/// </summary>
 	public static void Attach(Border tile, DesktopItem item, ISelHost host, Action afterLaunch, Func<List<MenuEntry>> extras, Func<Native.POINT, bool>? isOutside = null, Action<List<string>, Native.POINT>? dropOutside = null)
 	{
 		Point? down = null;
@@ -160,9 +161,8 @@ internal static class Tiles
 		};
 		tile.MouseMove += (object s, MouseEventArgs e) =>
 		{
-			if (down.HasValue)
+			if (down is Point pressedAt)
 			{
-				Point valueOrDefault = down.GetValueOrDefault();
 				if (e.LeftButton != MouseButtonState.Pressed)
 				{
 					down = null;
@@ -170,7 +170,7 @@ internal static class Tiles
 				else
 				{
 					Point position = e.GetPosition(tile);
-					if (!(Math.Abs(position.X - valueOrDefault.X) + Math.Abs(position.Y - valueOrDefault.Y) < 8.0))
+					if (!(Math.Abs(position.X - pressedAt.X) + Math.Abs(position.Y - pressedAt.Y) < 8.0)) // 8px 넘게 움직이면 끌기 시작
 					{
 						down = null;
 						StartDrag(tile, item, host, isOutside, dropOutside);
@@ -214,18 +214,19 @@ internal static class Tiles
 				Sel.Set(host, new string[1] { item.Key });
 				Sel.Anchor = item.Key;
 			}
-			List<string> list = new List<string> { item.Key };
-			list.AddRange(from k in Sel.Ordered(host)
+			// 우클릭한 것이 맨 앞, 나머지 선택된 것들이 뒤 (Windows 메뉴는 첫 항목 기준)
+			List<string> targets = new List<string> { item.Key };
+			targets.AddRange(from k in Sel.Ordered(host)
 				where !string.Equals(k, item.Key, StringComparison.OrdinalIgnoreCase)
 				select k);
-			List<MenuEntry> list2 = extras();
+			List<MenuEntry> ownEntries = extras();
 			Window window = Window.GetWindow(tile);
-			if (window == null || !ShellMenu.Show(window, list, list2, item.IsVirtual ? null : ((Action)(() =>
+			if (window == null || !ShellMenu.Show(window, targets, ownEntries, item.IsVirtual ? null : ((Action)(() =>
 			{
 				App.Instance.RenameItem(item);
 			}))))
 			{
-				ShowFallbackMenu(tile, item, list2);
+				ShowFallbackMenu(tile, item, ownEntries);
 			}
 		};
 	}
@@ -248,9 +249,9 @@ internal static class Tiles
 		{
 			contextMenu.Items.Add(new Separator());
 		}
-		foreach (MenuEntry item2 in more)
+		foreach (MenuEntry entry in more)
 		{
-			contextMenu.Items.Add(ToWpf(item2));
+			contextMenu.Items.Add(ToWpf(entry));
 		}
 		App.Track(contextMenu);
 		contextMenu.PlacementTarget = tile;
@@ -286,48 +287,51 @@ internal static class Tiles
 
 	private static void StartDrag(Border tile, DesktopItem item, ISelHost host, Func<Native.POINT, bool>? isOutside, Action<List<string>, Native.POINT>? dropOutside)
 	{
-		List<string> list;
+		// 선택된 걸 끌면 선택된 것 전부, 아니면 이것 하나
+		List<string> dragged;
 		if (Sel.Contains(host, item.Key))
 		{
-			list = Sel.Ordered(host);
+			dragged = Sel.Ordered(host);
 		}
 		else
 		{
 			Sel.Clear();
-			list = new List<string> { item.Key };
+			dragged = new List<string> { item.Key };
 		}
 		App.DragSource = host;
-		DragGhost ghost = new DragGhost(item, list.Count);
+		DragGhost ghost = new DragGhost(item, dragged.Count);
 		ghost.Show();
 		ghost.Follow();
-		DispatcherTimer dispatcherTimer = new DispatcherTimer(DispatcherPriority.Render)
+		DispatcherTimer followTimer = new DispatcherTimer(DispatcherPriority.Render)
 		{
 			Interval = TimeSpan.FromMilliseconds(10L)
 		};
-		dispatcherTimer.Tick += (object? s2, EventArgs e2) =>
+		followTimer.Tick += (object? s2, EventArgs e2) =>
 		{
 			ghost.Follow();
 		};
-		dispatcherTimer.Start();
-		GiveFeedbackEventHandler value = (object s2, GiveFeedbackEventArgs e2) =>
+		followTimer.Start();
+		// 끄는 동안: 놓을 수 있는 곳인지 끌림 그림에 표시. 빈 바탕화면 위는 놓을 수 없음(금지 커서),
+		// 가방 원 밖은 "꺼내기"(화살표 커서)
+		GiveFeedbackEventHandler onFeedback = (object s2, GiveFeedbackEventArgs e2) =>
 		{
 			ghost.Follow();
 			if (Native.GetCursorPos(out var p2))
 			{
-				bool flag = Native.IsDesktopAt(p2);
-				bool flag2 = isOutside != null && isOutside(p2) && ((e2.Effects == DragDropEffects.None) | flag);
-				ghost.SetValid((e2.Effects != DragDropEffects.None && !flag) | flag2);
-				if (flag2 | flag)
+				bool overDesktop = Native.IsDesktopAt(p2);
+				bool takeOut = isOutside != null && isOutside(p2) && ((e2.Effects == DragDropEffects.None) | overDesktop);
+				ghost.SetValid((e2.Effects != DragDropEffects.None && !overDesktop) | takeOut);
+				if (takeOut | overDesktop)
 				{
 					e2.UseDefaultCursors = false;
-					Mouse.SetCursor(flag2 ? Cursors.Arrow : Cursors.No);
+					Mouse.SetCursor(takeOut ? Cursors.Arrow : Cursors.No);
 					e2.Handled = true;
 				}
 			}
 		};
 		bool cancelled = false;
 		bool droppedOnDesktop = false;
-		QueryContinueDragEventHandler value2 = (object s2, QueryContinueDragEventArgs e2) =>
+		QueryContinueDragEventHandler onQueryContinue = (object s2, QueryContinueDragEventArgs e2) =>
 		{
 			Native.POINT p2;
 			if (e2.EscapePressed)
@@ -341,43 +345,45 @@ internal static class Tiles
 				e2.Handled = true;
 			}
 		};
-		tile.GiveFeedback += value;
-		tile.QueryContinueDrag += value2;
-		foreach (string item2 in list)
+		tile.GiveFeedback += onFeedback;
+		tile.QueryContinueDrag += onQueryContinue;
+		foreach (string key in dragged)
 		{
-			host.TileOf(item2)?.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.3, 120.0));
+			host.TileOf(key)?.BeginAnimation(UIElement.OpacityProperty, Anim.To(0.3, 120.0));
 		}
-		DataObject dataObject = new DataObject("DesktopPop.ItemKey", string.Join("\n", list));
-		string[] array = list.Where((string k) => !k.StartsWith("::")).ToArray();
-		if (array.Length != 0)
+		// DesktopPop 안에서는 아이콘 키로, 탐색기 등 다른 프로그램에는 실제 파일로 끌어 놓을 수 있게
+		DataObject dataObject = new DataObject("DesktopPop.ItemKey", string.Join("\n", dragged));
+		string[] files = dragged.Where((string k) => !k.StartsWith("::")).ToArray();
+		if (files.Length != 0)
 		{
-			dataObject.SetData(DataFormats.FileDrop, array);
+			dataObject.SetData(DataFormats.FileDrop, files);
 		}
-		DragDropEffects allowedEffects = ((array.Length != 0) ? (DragDropEffects.Copy | DragDropEffects.Move | DragDropEffects.Link) : DragDropEffects.Move);
-		DragDropEffects dragDropEffects = DragDropEffects.None;
+		DragDropEffects allowedEffects = ((files.Length != 0) ? (DragDropEffects.Copy | DragDropEffects.Move | DragDropEffects.Link) : DragDropEffects.Move);
+		DragDropEffects result = DragDropEffects.None;
 		try
 		{
-			dragDropEffects = DragDrop.DoDragDrop(tile, dataObject, allowedEffects);
+			result = DragDrop.DoDragDrop(tile, dataObject, allowedEffects);
 		}
 		finally
 		{
-			dispatcherTimer.Stop();
-			tile.GiveFeedback -= value;
-			tile.QueryContinueDrag -= value2;
+			followTimer.Stop();
+			tile.GiveFeedback -= onFeedback;
+			tile.QueryContinueDrag -= onQueryContinue;
 			ghost.Close();
-			foreach (string item3 in list)
+			foreach (string key in dragged)
 			{
-				host.TileOf(item3)?.BeginAnimation(UIElement.OpacityProperty, Anim.To(1.0, 150.0));
+				host.TileOf(key)?.BeginAnimation(UIElement.OpacityProperty, Anim.To(1.0, 150.0));
 			}
 			App.DragSource = null;
 		}
-		if ((dragDropEffects != DragDropEffects.None) | droppedOnDesktop)
+		if ((result != DragDropEffects.None) | droppedOnDesktop)
 		{
 			Sel.Clear(host);
 		}
-		if (!cancelled && (droppedOnDesktop || dragDropEffects == DragDropEffects.None) && dropOutside != null && isOutside != null && Native.GetCursorPos(out var p) && isOutside(p))
+		// 가방에서 원 밖(아무도 안 받는 곳)에 놓았으면 꺼내기
+		if (!cancelled && (droppedOnDesktop || result == DragDropEffects.None) && dropOutside != null && isOutside != null && Native.GetCursorPos(out var p) && isOutside(p))
 		{
-			dropOutside(list, p);
+			dropOutside(dragged, p);
 		}
 	}
 

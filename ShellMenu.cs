@@ -6,10 +6,12 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Threading;
 
 namespace DesktopPop;
 
+/// <summary>아이콘 우클릭 메뉴: Windows 원래 메뉴(도우미 프로세스) 또는 DesktopPop 간단 메뉴.</summary>
 internal static class ShellMenu
 {
 	public static bool Show(Window owner, IReadOnlyList<string> paths, List<MenuEntry> extras, Action? onRename)
@@ -19,20 +21,34 @@ internal static class ShellMenu
 			return false;
 		}
 		string[] targets = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+		// 기본: Windows 원래 우클릭 메뉴 (압축 풀기·압축하기, 보내기 등). 도우미 프로세스에서 띄우고,
+		// 못 띄우거나 도우미가 튕기면 간단 메뉴로. 꺼 두면 처음부터 간단 메뉴.
+		if (App.Instance.Config.UseWindowsMenu)
+		{
+			bool extended = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+			NativeShellMenu.ShowAsync(owner, targets, extras, onRename, () => ShowSimple(owner, targets, extras, onRename), extended);
+			return true;
+		}
+		ShowSimple(owner, targets, extras, onRename);
+		return true;
+	}
+
+	/// <summary>DesktopPop 간단 메뉴 (다른 프로그램의 메뉴 확장을 안 불러서 튕길 일이 없음).</summary>
+	private static void ShowSimple(Window owner, string[] targets, List<MenuEntry> extras, Action? onRename)
+	{
 		string[] files = targets.Where((string p) => !p.StartsWith("::", StringComparison.Ordinal)).ToArray();
 		ContextMenu contextMenu = new ContextMenu
 		{
 			PlacementTarget = owner,
 			Placement = PlacementMode.MousePoint
 		};
-		string text = ((targets.Length > 1) ? $" ({targets.Length}개)" : "");
-		contextMenu.Items.Add(ActionItem("열기" + text, () =>
+		string count = ((targets.Length > 1) ? $" ({targets.Length}개)" : "");
+		contextMenu.Items.Add(ActionItem("열기" + count, () =>
 		{
 			Sel.Clear();
-			string[] array2 = targets;
-			for (int i = 0; i < array2.Length; i++)
+			foreach (string target in targets)
 			{
-				Shell.Launch(Item(array2[i]));
+				Shell.Launch(Item(target));
 			}
 		}));
 		if (files.Length != 0)
@@ -42,15 +58,15 @@ internal static class ShellMenu
 				Shell.OpenLocation(Item(files[0]));
 			}));
 			contextMenu.Items.Add(new Separator());
-			contextMenu.Items.Add(ActionItem("잘라내기" + text, () =>
+			contextMenu.Items.Add(ActionItem("잘라내기" + count, () =>
 			{
 				CopyPaths(files, cut: true);
 			}));
-			contextMenu.Items.Add(ActionItem("복사" + text, () =>
+			contextMenu.Items.Add(ActionItem("복사" + count, () =>
 			{
 				CopyPaths(files, cut: false);
 			}));
-			contextMenu.Items.Add(ActionItem("삭제" + text, () =>
+			contextMenu.Items.Add(ActionItem("삭제" + count, () =>
 			{
 				Sel.Clear();
 				App.Instance.RecycleFiles(files);
@@ -82,8 +98,7 @@ internal static class ShellMenu
 			{
 				Header = "속성 (파일 선택)"
 			};
-			string[] array = targets;
-			foreach (string path in array)
+			foreach (string path in targets)
 			{
 				DesktopItem item = Item(path);
 				MenuItem menuItem2 = ActionItem(item.DisplayLabel, () =>
@@ -95,18 +110,21 @@ internal static class ShellMenu
 			}
 			contextMenu.Items.Add(menuItem);
 		}
-		if (files.Length != 0)
+		MenuItem menuItem3 = ActionItem("Windows 메뉴 (압축·보내기 등)...", () =>
 		{
-			MenuItem menuItem3 = ActionItem("탐색기에서 추가 메뉴...", () =>
+			// 이 메뉴가 닫힌 뒤 같은 자리에 Windows 원래 메뉴를 띄움 (도우미가 실패하면 탐색기에서 파일 위치를 열어 줌)
+			NativeShellMenu.ShowAsync(owner, targets, new List<MenuEntry>(), onRename, () =>
 			{
-				Shell.OpenLocation(Item(files[0]));
-			});
-			menuItem3.ToolTip = "탐색기에서 선택된 파일을 우클릭하면 압축·공유·연결 프로그램 등의 메뉴를 사용할 수 있어요.";
-			contextMenu.Items.Add(menuItem3);
-		}
+				if (files.Length != 0)
+				{
+					Shell.OpenLocation(Item(files[0]));
+				}
+			}, extended: false);
+		});
+		menuItem3.ToolTip = "압축 풀기·압축하기, 보내기, 연결 프로그램 같은 Windows 원래 우클릭 메뉴를 띄워요.";
+		contextMenu.Items.Add(menuItem3);
 		App.Track(contextMenu);
 		contextMenu.IsOpen = true;
-		return true;
 	}
 
 	private static DesktopItem Item(string path)

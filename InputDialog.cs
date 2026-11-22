@@ -3,6 +3,7 @@ using System.Windows.Controls;
 
 namespace DesktopPop;
 
+/// <summary>이름을 입력받는 작은 창 (새 폴더, 이름 바꾸기, 가방 이름).</summary>
 internal sealed class InputDialog : Window
 {
 	private readonly TextBox box;
@@ -15,11 +16,11 @@ internal sealed class InputDialog : Window
 		ResizeMode = ResizeMode.NoResize;
 		WindowStartupLocation = WindowStartupLocation.CenterScreen;
 		Topmost = true;
-		StackPanel stackPanel = new StackPanel
+		StackPanel layout = new StackPanel
 		{
 			Margin = new Thickness(16.0)
 		};
-		stackPanel.Children.Add(new TextBlock
+		layout.Children.Add(new TextBlock
 		{
 			Text = prompt,
 			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
@@ -29,8 +30,8 @@ internal sealed class InputDialog : Window
 			Text = initial,
 			Padding = new Thickness(4.0)
 		};
-		stackPanel.Children.Add(box);
-		StackPanel stackPanel2 = new StackPanel
+		layout.Children.Add(box);
+		StackPanel buttons = new StackPanel
 		{
 			Orientation = Orientation.Horizontal,
 			HorizontalAlignment = HorizontalAlignment.Right,
@@ -53,10 +54,10 @@ internal sealed class InputDialog : Window
 			Width = 72.0,
 			IsCancel = true
 		};
-		stackPanel2.Children.Add(button);
-		stackPanel2.Children.Add(element);
-		stackPanel.Children.Add(stackPanel2);
-		Content = stackPanel;
+		buttons.Children.Add(button);
+		buttons.Children.Add(element);
+		layout.Children.Add(buttons);
+		Content = layout;
 		Loaded += (object s, RoutedEventArgs e) =>
 		{
 			box.Focus();

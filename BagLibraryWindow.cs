@@ -12,6 +12,7 @@ using Microsoft.Win32;
 
 namespace DesktopPop;
 
+/// <summary>가방 그림을 고르는 창 (새 가방 만들기 / 그림 바꾸기).</summary>
 internal sealed class BagLibraryWindow : Window
 {
 	private readonly bool createMode;
@@ -99,7 +100,7 @@ internal sealed class BagLibraryWindow : Window
 			LastChildFill = false
 		};
 		DockPanel.SetDock(dockPanel2, Dock.Bottom);
-		TextBlock textBlock = new TextBlock
+		TextBlock restoreLink = new TextBlock
 		{
 			Text = "기본 그림 다시 넣기",
 			Foreground = Soft(153),
@@ -108,13 +109,13 @@ internal sealed class BagLibraryWindow : Window
 			VerticalAlignment = VerticalAlignment.Center,
 			TextDecorations = TextDecorations.Underline
 		};
-		textBlock.MouseLeftButtonUp += (object s, MouseButtonEventArgs e) =>
+		restoreLink.MouseLeftButtonUp += (object s, MouseButtonEventArgs e) =>
 		{
 			BagLibrary.WriteDefaults();
 			Reload();
 		};
-		DockPanel.SetDock(textBlock, Dock.Left);
-		dockPanel2.Children.Add(textBlock);
+		DockPanel.SetDock(restoreLink, Dock.Left);
+		dockPanel2.Children.Add(restoreLink);
 		Border element3 = MakeButton("취소", primary: false, Close);
 		okButton = MakeButton(createMode ? "만들기" : "이 그림으로 바꾸기", primary: true, Confirm);
 		DockPanel.SetDock(element3, Dock.Right);
@@ -223,9 +224,9 @@ internal sealed class BagLibraryWindow : Window
 			TextAlignment = TextAlignment.Center,
 			Margin = new Thickness(6.0, 0.0, 6.0, 0.0)
 		};
-		StackPanel stackPanel = new StackPanel();
-		stackPanel.Children.Add(image);
-		stackPanel.Children.Add(element);
+		StackPanel cardContent = new StackPanel();
+		cardContent.Children.Add(image);
+		cardContent.Children.Add(element);
 		Border del = new Border
 		{
 			Width = 22.0,
@@ -273,7 +274,7 @@ internal sealed class BagLibraryWindow : Window
 			}
 		};
 		Grid grid = new Grid();
-		grid.Children.Add(stackPanel);
+		grid.Children.Add(cardContent);
 		grid.Children.Add(del);
 		Border card = new Border
 		{
@@ -416,8 +417,8 @@ internal sealed class BagLibraryWindow : Window
 		try
 		{
 			string item = BagLibrary.UseForBag(selected);
-			string text = (createMode ? nameBox.Text.Trim() : "");
-			result = (item, string.IsNullOrEmpty(text) ? "가방" : text);
+			string bagName = (createMode ? nameBox.Text.Trim() : "");
+			result = (item, string.IsNullOrEmpty(bagName) ? "가방" : bagName);
 			Close();
 		}
 		catch (Exception ex)
